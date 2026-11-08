@@ -595,10 +595,28 @@ async function buildPluginRuntimeAssets() {
       __NUVIO_CRYPTO_JS_SOURCE__: JSON.stringify(cryptoJsSource)
     }
   });
-  await cp(
-    path.join(rootDir, "node_modules", "quickjs-emscripten", "LICENSE"),
-    path.join(distDir, "assets", "libs", "quickjs-emscripten.LICENSE")
-  );
+  // Pinned quickjs-emscripten 0.26.0 ships no LICENSE file (only dist, README
+  // and package.json), so copy the first licence-bearing file and fall back to a
+  // generated notice: the attribution artefact must exist for every build.
+  const quickjsRoot = path.join(rootDir, "node_modules", "quickjs-emscripten");
+  const quickjsLicenseTarget = path.join(distDir, "assets", "libs", "quickjs-emscripten.LICENSE");
+  let quickjsLicenseCopied = false;
+  for (const candidate of ["LICENSE", "LICENSE.txt", "LICENSE.md", "README.md"]) {
+    try {
+      await cp(path.join(quickjsRoot, candidate), quickjsLicenseTarget);
+      quickjsLicenseCopied = true;
+      break;
+    } catch (_) {
+      // Try the next candidate.
+    }
+  }
+  if (!quickjsLicenseCopied) {
+    const metadata = JSON.parse(await readFile(path.join(quickjsRoot, "package.json"), "utf8"));
+    await writeFile(
+      quickjsLicenseTarget,
+      `quickjs-emscripten ${metadata.version}\nLicense: ${metadata.license || "MIT"}\nhttps://github.com/justjake/quickjs-emscripten\n`
+    );
+  }
   await cp(
     path.join(rootDir, "node_modules", "crypto-js", "LICENSE"),
     path.join(distDir, "assets", "libs", "crypto-js.LICENSE")
