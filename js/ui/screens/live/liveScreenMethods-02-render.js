@@ -320,76 +320,103 @@ export function createLiveScreenMethods02() {
 
   const STYLE = `
     <style id="live-screen-style">
-      .live-shell { position: absolute; inset: 0; height: 100%; display: flex; flex-direction: column; background: #0E0E12; color: #f5f5f5; overflow: hidden; }
+      /* STATIC LAYOUT CONTRACT (measured from the Android TV reference, dp x1.5):
+         every box has a fixed size. Nothing may resize on focus — a keypress
+         only toggles classes, writes hero text/src and scrolls. The focus
+         state is a fill plus an inner ring: no scale, no elevation, no layout
+         change, and no size/position transition (only a short background-color
+         fade where allowed). */
+      .live-shell { position: absolute; inset: 0; width: 100%; height: 100%; display: flex; flex-direction: column; background: #0D0D0D; color: #FFFFFF; overflow: hidden; }
       /* A flex child with overflow does not scroll unless it may shrink below
          its content: min-height:0 / min-width:0 everywhere it matters. Without
          them the panel grows with the content, the ancestor clips it, and the
          focused row walks off-screen while scrollTop stays 0. */
       /* HERO ---------------------------------------------------------------- */
-      .live-hero { flex-shrink: 0; display: flex; align-items: stretch; gap: 24px; margin: 20px 40px 16px; background: #111111; border-radius: 20px; padding: 20px 24px; box-sizing: border-box; min-height: 240px; position: relative; }
+      /* Fixed 264px height (183px content + 21px padding on both sides); the
+         hero is never content-sized, so showing/patching it can never resize
+         the body below. Glass card: #0D0D0D at 0.86 + 1px white hairline. */
+      .live-hero { flex-shrink: 0; display: flex; align-items: stretch; gap: 20px; margin: 20px 36px 16px 84px; background: rgba(13,13,13,0.86); border: 1px solid rgba(255,255,255,0.12); border-radius: 30px; padding: 21px 27px; box-sizing: border-box; height: 264px; position: relative; overflow: hidden; }
       .live-hero.is-hidden { display: none; }
-      .live-hero-main { display: flex; align-items: center; gap: 24px; flex: 1; min-width: 0; }
-      .live-hero-logo { position: relative; width: 108px; height: 108px; border-radius: 16px; background: rgba(0,0,0,0.4); overflow: hidden; flex-shrink: 0; }
-      .live-hero-logo-initial { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 44px; font-weight: 700; color: #9CA3AF; }
-      .live-hero-logo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-      .live-hero-logo img.is-broken { display: none; }
-      .live-hero-meta { flex: 1; min-width: 0; }
-      .live-hero-topline { display: flex; align-items: center; gap: 16px; }
-      .live-hero-number { font-size: 26px; font-weight: 700; color: #9CA3AF; }
-      .live-hero-badge { display: inline-block; background: #e11d2e; color: #ffffff; border-radius: 6px; font-size: 18px; font-weight: 700; letter-spacing: 1px; padding: 4px 12px; }
-      .live-hero-name { font-size: 44px; font-weight: 700; line-height: 1.15; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .live-hero-source { font-size: 22px; color: #9CA3AF; margin-top: 10px; }
-      .live-hero-noprogram { font-size: 20px; color: #9CA3AF; margin-top: 6px; }
-      .live-hero-actions { position: absolute; top: 16px; right: 20px; display: flex; gap: 14px; }
-      .live-pill { display: inline-flex; align-items: center; gap: 10px; background: rgba(255,255,255,0.08); border: 0; border-radius: 999px; color: #9CA3AF; font-size: 20px; padding: 12px 24px; outline: none; cursor: pointer; box-sizing: border-box; }
-      .live-pill.focused { outline: 3px solid var(--secondary-color, #ffffff); outline-offset: 2px; background: rgba(255,255,255,0.16); color: #ffffff; }
-      /* 16:9 preview box: the logo sits centred. We have no frame source, so
-         no fake thumbnail is ever drawn. */
-      .live-hero-preview { flex-shrink: 0; width: 426px; height: 240px; border-radius: 14px; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; overflow: hidden; }
-      .live-hero-preview img { max-width: 70%; max-height: 70%; object-fit: contain; }
-      .live-hero-preview img.is-broken { display: none; }
+      .live-hero-main { display: flex; align-items: center; gap: 20px; flex: 1; min-width: 0; min-height: 0; }
+      .live-hero-logo { position: relative; width: 96px; height: 102px; border-radius: 15px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); overflow: hidden; flex-shrink: 0; }
+      .live-hero-logo-initial { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 42px; font-weight: 700; color: #808080; }
+      /* Late-loading logos are reserved a fixed box; the 64px image fills it
+         with object-fit: contain so decode time can never shift anything. */
+      .live-hero-logo img { position: absolute; top: 0; right: 0; bottom: 0; left: 0; margin: auto; width: 64px; height: 64px; object-fit: contain; }
+      .live-hero-logo img.is-broken, .live-hero-logo img.is-hidden { display: none; }
+      .live-hero-meta { flex: 1; min-width: 0; min-height: 0; }
+      /* Channel line: number + channel name, 19.5px muted. */
+      .live-hero-topline { display: flex; align-items: baseline; gap: 10px; }
+      .live-hero-number { font-size: 19.5px; line-height: 24px; height: 24px; font-weight: 700; color: #808080; }
+      .live-hero-channel { font-size: 19.5px; line-height: 24px; height: 24px; color: #B3B3B3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      /* Title: the channel name, 42px ExtraBold, exactly one line. */
+      .live-hero-name { font-size: 42px; font-weight: 800; line-height: 48px; height: 48px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .live-hero-source { font-size: 19.5px; line-height: 24px; height: 24px; color: #B3B3B3; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .live-hero-actions { position: absolute; top: 21px; right: 27px; display: flex; gap: 14px; }
+      /* Gear/search control: 51x51, radius 15. */
+      .live-pill { display: inline-flex; align-items: center; justify-content: center; width: 51px; height: 51px; background: rgba(13,13,13,0.66); border: 0; border-radius: 15px; color: #B3B3B3; font-size: 19.5px; outline: none; cursor: pointer; box-sizing: border-box; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); transition: background-color 90ms ease; }
+      .live-pill.focused { outline: 2px solid #FFFFFF; outline-offset: -2px; background: #303030; color: #FFFFFF; }
+      /* 16:9 preview box: fixed 325x183, radius 18; the logo sits centred. We
+         have no frame source, so no fake thumbnail is ever drawn. */
+      .live-hero-preview { flex-shrink: 0; width: 325px; height: 183px; border-radius: 18px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
+      .live-hero-preview img { width: 100%; height: 100%; object-fit: contain; }
+      .live-hero-preview img.is-broken, .live-hero-preview img.is-hidden { display: none; }
       .live-hero-preview-initial { font-size: 64px; font-weight: 700; color: #55555c; }
       /* BODY: narrow LEFT RAIL + channel rows on the right ------------------- */
-      .live-body { flex: 1; min-height: 0; display: flex; gap: 20px; padding: 0 40px 24px; box-sizing: border-box; }
-      .live-rail { flex: 0 0 21%; min-width: 0; min-height: 0; overflow-y: auto; scroll-behavior: auto; display: flex; flex-direction: column; gap: 8px; box-sizing: border-box; transition: opacity 120ms ease; }
+      /* Screen padding: 84px left, 36px right. */
+      .live-body { flex: 1; min-height: 0; min-width: 0; display: flex; gap: 20px; padding: 0 36px 24px 84px; box-sizing: border-box; }
+      /* The rail is a FIXED 285px column (never a %), and position:relative
+         makes it the offsetParent of its rows so their offsets can be cached
+         once per real render. */
+      .live-rail { flex: 0 0 285px; min-width: 0; min-height: 0; overflow-y: auto; scroll-behavior: auto; position: relative; display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; transition: opacity 120ms ease; }
       .live-rail.is-dimmed { opacity: 0.45; }
-      .live-rail-row { flex-shrink: 0; display: flex; align-items: center; gap: 14px; min-height: 84px; background: #111111; border-radius: 14px; padding: 12px 20px; outline: 3px solid transparent; outline-offset: -3px; cursor: pointer; box-sizing: border-box; transition: background-color 90ms ease, outline-color 90ms ease; }
-      .live-rail-row.focused { outline-color: #ffffff; background: #1b1b22; }
-      .live-rail-search { position: relative; }
-      .live-rail-icon { flex-shrink: 0; font-size: 26px; color: #9CA3AF; }
-      .live-rail-label { flex: 1; min-width: 0; font-size: 24px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .live-rail-count { flex-shrink: 0; font-size: 20px; color: #9CA3AF; }
-      .live-rail-row.focused .live-rail-count { color: #d1d5db; }
+      /* Rail tiles: search 45px, group tile 51px, playlist header 48px — all
+         fixed. Idle: #0D0D0D at 0.66 + inner hairline; focus: #303030 fill
+         plus a 2px white ring painted INSIDE (no scale, no layout change). */
+      .live-rail-row { flex-shrink: 0; display: flex; align-items: center; gap: 14px; height: 51px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 18px; padding: 0 15px 0 18px; outline: 2px solid transparent; outline-offset: -2px; cursor: pointer; box-sizing: border-box; overflow: hidden; transition: background-color 90ms ease; }
+      .live-rail-row.focused { outline-color: #FFFFFF; background: #303030; }
+      /* Selected-but-unfocused rail row: 1px ring at alpha 0.8. */
+      .live-rail-row.is-selected { box-shadow: inset 0 0 0 1px rgba(245,245,245,0.8); }
+      .live-rail-search { position: relative; height: 45px; }
+      .live-rail-icon { flex-shrink: 0; font-size: 21px; line-height: 24px; color: #B3B3B3; }
+      .live-rail-label { flex: 1; min-width: 0; font-size: 21px; line-height: 24px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .live-rail-count { flex-shrink: 0; font-size: 18px; line-height: 22px; color: #808080; }
+      .live-rail-row.focused .live-rail-count { color: #B3B3B3; }
       /* The search input sits exactly over its rail row: a real <input> so the
          TV system IME can attach to it, styled invisible as a chrome-less field. */
-      .live-search-input { position: absolute; inset: 0; width: 100%; height: 100%; background: transparent; border: 0; outline: none; color: #f5f5f5; font-size: 22px; padding: 0 20px 0 62px; box-sizing: border-box; }
-      .live-source-header { border-radius: 14px; }
-      .live-source-chevron { flex-shrink: 0; width: 26px; font-size: 24px; color: #9CA3AF; transition: transform 120ms ease; }
-      .live-rail-category { margin-left: 26px; min-height: 72px; }
-      .live-rail-category .live-rail-label { font-weight: 500; font-size: 22px; color: #d1d5db; }
+      .live-search-input { position: absolute; inset: 0; width: 100%; height: 100%; background: transparent; border: 0; outline: none; color: #FFFFFF; font-size: 19.5px; padding: 0 15px 0 18px; box-sizing: border-box; }
+      .live-source-header { height: 48px; }
+      .live-source-chevron { flex-shrink: 0; width: 22px; font-size: 19.5px; line-height: 24px; color: #808080; transition: transform 120ms ease; }
+      .live-rail-category { margin-left: 26px; height: 51px; }
+      .live-rail-category .live-rail-label { font-weight: 500; font-size: 21px; color: #B3B3B3; }
       /* CHANNEL ROWS (right side) ------------------------------------------- */
-      .live-channel-list { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; scroll-behavior: auto; display: flex; flex-direction: column; gap: 12px; box-sizing: border-box; }
-      .live-channel-row { flex-shrink: 0; display: flex; align-items: center; gap: 20px; min-height: 126px; background: #111111; border-radius: 16px; padding: 14px 20px; outline: 3px solid transparent; outline-offset: -3px; cursor: pointer; box-sizing: border-box; transition: background-color 90ms ease, outline-color 90ms ease; }
-      .live-channel-row.focused { outline-color: #ffffff; background: #1b1b22; }
-      .live-row-logo { position: relative; width: 66px; height: 66px; border-radius: 12px; background: rgba(0,0,0,0.4); overflow: hidden; flex-shrink: 0; }
-      .live-row-logo-initial { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 700; color: #9CA3AF; }
+      .live-channel-list { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; scroll-behavior: auto; position: relative; display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; }
+      /* Fixed row pitch 57px: tile 51px + 6px gap. Inner padding 15px; the
+         62x39 logo box, the 2-line-clamped 21px name and the muted meta line
+         all live INSIDE the fixed tile — long text can never grow the row. */
+      .live-channel-row { flex-shrink: 0; display: flex; align-items: center; gap: 14px; height: 51px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 18px; padding: 0 15px; outline: 2px solid transparent; outline-offset: -2px; cursor: pointer; box-sizing: border-box; overflow: hidden; transition: background-color 90ms ease; }
+      .live-channel-row.focused { outline-color: #FFFFFF; background: #303030; }
+      .live-row-logo { position: relative; width: 62px; height: 39px; border-radius: 12px; background: rgba(13,13,13,0.66); overflow: hidden; flex-shrink: 0; }
+      .live-row-logo-initial { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 21px; font-weight: 700; color: #808080; }
       .live-row-logo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
       .live-row-logo img.is-broken { display: none; }
-      .live-row-text { flex: 1; min-width: 0; }
-      .live-row-name { font-size: 24px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .live-row-number { font-size: 20px; color: #9CA3AF; }
-      .live-channel-row.focused .live-row-number { color: #55555c; }
-      .live-row-source { font-size: 18px; color: #9CA3AF; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .live-star { flex-shrink: 0; width: 56px; height: 56px; background: transparent; border: 0; outline: none; cursor: pointer; font-size: 34px; line-height: 1; color: #6b7280; padding: 0; }
+      .live-row-text { flex: 1; min-width: 0; min-height: 0; }
+      /* Fixed line-height + a 2-line clamp: long channel names read fully
+         enough without ever changing the row's fixed geometry. */
+      .live-row-name { font-size: 21px; line-height: 24px; max-height: 48px; font-weight: 700; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: break-word; }
+      .live-row-meta { display: flex; align-items: baseline; gap: 8px; margin-top: 2px; min-width: 0; }
+      .live-row-number { flex-shrink: 0; font-size: 15px; line-height: 18px; color: #808080; }
+      .live-row-source { font-size: 15px; line-height: 18px; color: #808080; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .live-star { flex-shrink: 0; width: 39px; height: 39px; background: transparent; border: 0; outline: none; cursor: pointer; font-size: 24px; line-height: 1; color: #808080; padding: 0; }
       .live-star .live-star-glyph { visibility: hidden; }
       .live-channel-row:hover .live-star .live-star-glyph, .live-star.focused .live-star-glyph { visibility: visible; }
-      .live-star.is-favorite { color: #F5C400; }
+      .live-star.is-favorite { color: #FFD700; }
       .live-star.is-favorite .live-star-glyph { visibility: visible; }
-      .live-star.focused { outline: 3px solid var(--secondary-color, #f5f5f5); outline-offset: 2px; border-radius: 10px; }
-      .live-panel-state { display: flex; align-items: center; gap: 12px; color: #9CA3AF; font-size: 20px; padding: 20px 4px; }
-      .live-panel-error, .live-panel-hint { color: #9CA3AF; font-size: 20px; padding: 20px 4px; overflow-wrap: anywhere; }
+      .live-star.focused { outline: 2px solid #FFFFFF; outline-offset: -2px; border-radius: 10px; }
+      .live-panel-state { display: flex; align-items: center; gap: 12px; color: #808080; font-size: 19.5px; padding: 20px 4px; }
+      .live-panel-error, .live-panel-hint { color: #808080; font-size: 19.5px; padding: 20px 4px; overflow-wrap: anywhere; }
       .live-panel-error { color: #ffb4a8; }
-      .live-notice { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%); max-width: 70%; background: rgba(20,20,26,0.95); border: 1px solid rgba(255,255,255,0.2); border-radius: 10px; padding: 12px 18px; font-size: 15px; color: #f5f5f5; overflow-wrap: anywhere; z-index: 2; }
+      .live-notice { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%); max-width: 70%; background: rgba(13,13,13,0.95); border: 1px solid #333333; border-radius: 10px; padding: 12px 18px; font-size: 15px; color: #FFFFFF; overflow-wrap: anywhere; z-index: 2; }
     </style>
   `;
 
@@ -433,6 +460,8 @@ export function createLiveScreenMethods02() {
         this.container.innerHTML = shellMarkup;
 
         ScreenUtils.indexFocusables(this.container);
+        // Real render: measure once NOW so the keypress path never has to.
+        this.cacheLayoutMetrics?.();
         this.bindSearchInput();
         const hasLogos = Boolean(this.container.querySelector(".live-row-logo img"));
         if (hasLogos) {
@@ -481,8 +510,12 @@ export function createLiveScreenMethods02() {
 
     // HERO -------------------------------------------------------------------
     // Hidden while nothing is selected; shows the focused/highlighted channel:
-    // logo box, `N` + red EN VIVO badge, the big name, the source name (where
-    // the reference shows its EPG time range) and the honest "no EPG" line.
+    // logo box (96x102, 64px logo), the number + channel name line (19.5px), the
+    // name as 42px ExtraBold one-line title, the source line, the search
+    // control and the 325x183 preview box. No EPG exists, so there is no
+    // badge, no time range, no description and no "no program" line.
+    // Every patchable field (and both hero <img> nodes) is ALWAYS present, so
+    // a focus move can update the hero purely in place — see updateHeroForFocus.
     renderHero() {
       try {
         const channel = this.heroChannel || null;
@@ -491,31 +524,30 @@ export function createLiveScreenMethods02() {
         const logo = channelLogoInfo(channel || {});
         const source = channel ? sourceNameFromChannelId(channel?.id) || sourceNameFromColumnId(channel?.group) : "";
         const number = label.number ? label.number.replace(/\.$/, "") : "";
+        const heroImg = (field, withSrc) =>
+          `<img data-hero-field="${field}" class="${withSrc ? "" : "is-hidden"}" alt="" onerror="this.classList.add('is-broken')"${withSrc ? ` src="${escapeHtml(logo.logo)}"` : ""} />`;
         return `
           <section class="live-hero${hidden}" aria-hidden="${channel ? "false" : "true"}">
             <div class="live-hero-main">
               <div class="live-hero-logo">
-                <span class="live-hero-logo-initial" aria-hidden="true">${escapeHtml(logo.letter)}</span>
-                ${logo.logo ? `<img src="${escapeHtml(logo.logo)}" alt="" onerror="this.classList.add('is-broken')" />` : ""}
+                <span class="live-hero-logo-initial" data-hero-field="logo-letter" aria-hidden="true">${escapeHtml(logo.letter)}</span>
+                ${heroImg("logo-img", Boolean(logo.logo))}
               </div>
               <div class="live-hero-meta">
                 <div class="live-hero-topline">
-                  ${number ? `<span class="live-hero-number" data-hero-field="number">${escapeHtml(number)}</span>` : `<span class="live-hero-number" data-hero-field="number"></span>`}
-                  <span class="live-hero-badge">EN VIVO</span>
+                  <span class="live-hero-number" data-hero-field="number">${escapeHtml(number)}</span>
+                  <span class="live-hero-channel" data-hero-field="channel">${escapeHtml(label.name)}</span>
                 </div>
                 <h1 class="live-hero-name" data-hero-field="name">${escapeHtml(label.name)}</h1>
                 <div class="live-hero-source" data-hero-field="source">${escapeHtml(source)}</div>
-                <div class="live-hero-noprogram">${escapeHtml(t("live_no_program_info", {}, "Sin información de programa"))}</div>
               </div>
             </div>
             <div class="live-hero-actions">
-              <div class="live-pill focusable" data-action="openSearch" role="button" aria-label="${escapeHtml(t("live_search_open", {}, "Buscar canales"))}">
-                <span aria-hidden="true">⌕</span><span>${escapeHtml(t("live_search_open", {}, "Buscar"))}</span>
-              </div>
-              <button class="live-pill focusable" data-action="showGuide">${escapeHtml(t("live_guide_button", {}, "Guía"))}</button>
+              <div class="live-pill focusable" data-action="openSearch" role="button" aria-label="${escapeHtml(t("live_search_open", {}, "Buscar canales"))}">⌕</div>
             </div>
             <div class="live-hero-preview" aria-hidden="true">
-              ${logo.logo ? `<img src="${escapeHtml(logo.logo)}" alt="" onerror="this.classList.add('is-broken')" />` : `<span class="live-hero-preview-initial">${escapeHtml(logo.letter)}</span>`}
+              <span class="live-hero-preview-initial" data-hero-field="preview-letter" aria-hidden="true">${escapeHtml(logo.letter)}</span>
+              ${heroImg("preview-img", Boolean(logo.logo))}
             </div>
           </section>
         `;
@@ -526,7 +558,9 @@ export function createLiveScreenMethods02() {
     },
 
     // Patch the hero fields in place for a newly focused/highlighted channel.
-    // Never a re-render: focus movement must stay cheap.
+    // Never a re-render, never a re-measure, never a restructure: focus moves
+    // only write textContent, classes and an img src into nodes that already
+    // exist from the last real render.
     updateHeroForFocus({ force = false } = {}) {
       try {
         const hero = this.container?.querySelector(".live-hero");
@@ -549,25 +583,37 @@ export function createLiveScreenMethods02() {
         const number = label.number ? label.number.replace(/\.$/, "") : "";
         const numberNode = hero.querySelector('[data-hero-field="number"]');
         if (numberNode) numberNode.textContent = number;
+        const channelNode = hero.querySelector('[data-hero-field="channel"]');
+        if (channelNode) channelNode.textContent = label.name;
         const nameNode = hero.querySelector('[data-hero-field="name"]');
         if (nameNode) nameNode.textContent = label.name;
         const sourceNode = hero.querySelector('[data-hero-field="source"]');
         if (sourceNode) sourceNode.textContent = source;
-        const logoBox = hero.querySelector(".live-hero-logo");
-        if (logoBox) {
-          logoBox.innerHTML = `
-            <span class="live-hero-logo-initial" aria-hidden="true">${escapeHtml(logo.letter)}</span>
-            ${logo.logo ? `<img src="${escapeHtml(logo.logo)}" alt="" onerror="this.classList.add('is-broken')" />` : ""}
-          `;
-        }
-        const preview = hero.querySelector(".live-hero-preview");
-        if (preview) {
-          preview.innerHTML = logo.logo
-            ? `<img src="${escapeHtml(logo.logo)}" alt="" onerror="this.classList.add('is-broken')" />`
-            : `<span class="live-hero-preview-initial">${escapeHtml(logo.letter)}</span>`;
-        }
+        this.patchHeroImage(hero, '[data-hero-field="logo-letter"]', '[data-hero-field="logo-img"]', logo);
+        this.patchHeroImage(hero, '[data-hero-field="preview-letter"]', '[data-hero-field="preview-img"]', logo);
       } catch (error) {
         reportLiveErrorSafe(error, "updateHeroForFocus");
+      }
+    },
+
+    // One hero image box (logo or 16:9 preview): swap the src on the node that
+    // already exists and toggle visibility classes. The box itself is fixed
+    // size, so a late-loading logo can never shift anything.
+    patchHeroImage(hero, letterSelector, imgSelector, logo) {
+      const letterNode = hero.querySelector(letterSelector);
+      if (letterNode) letterNode.textContent = logo.letter;
+      const imgNode = hero.querySelector(imgSelector);
+      if (!imgNode) return;
+      if (logo.logo) {
+        if (imgNode.getAttribute("src") !== logo.logo) {
+          imgNode.classList.remove("is-broken");
+          imgNode.setAttribute("src", logo.logo);
+        }
+        imgNode.classList.remove("is-hidden");
+      } else {
+        imgNode.classList.remove("is-broken");
+        imgNode.removeAttribute("src");
+        imgNode.classList.add("is-hidden");
       }
     },
 
@@ -675,11 +721,11 @@ export function createLiveScreenMethods02() {
     normalizeFocusState() {
       const railLength = this.railItems().length;
       if (this.focusZone === "hero") {
-        // The hero actions only exist while the hero is visible.
+        // The hero has a single control (search); one index, always 0.
         if (!this.heroChannel) {
           this.focusZone = "rail";
         } else {
-          this.heroIndex = clampIndex(this.heroIndex || 0, 2);
+          this.heroIndex = clampIndex(this.heroIndex || 0, 1);
           return;
         }
       }
@@ -712,6 +758,12 @@ export function createLiveScreenMethods02() {
           focusWithoutAutoScrollSafe(target);
           this.ensureFocusVisible?.({ smooth });
         }
+        // Selected-but-unfocused rail row: a 1px ring marks the active source
+        // (class toggle only — never a re-render, never a layout change).
+        const selectionId = String(this.railSelection ?? "");
+        this.container?.querySelectorAll(".live-rail-row").forEach((node) => {
+          node.classList.toggle("is-selected", Boolean(selectionId) && node.dataset.railId === selectionId);
+        });
         // The hero highlights the focused channel (sticky: it stays visible
         // after LEFT returns to the rail, until a new row takes over).
         if (this.focusZone === "rows") {
@@ -827,9 +879,8 @@ export function createLiveScreenMethods02() {
             ${logo.logo ? `<img src="${escapeHtml(logo.logo)}" alt="" onerror="this.classList.add('is-broken')" />` : ""}
           </div>
           <div class="live-row-text">
-            ${label.number ? `<div class="live-row-number">${escapeHtml(label.number)}</div>` : ""}
             <div class="live-row-name">${escapeHtml(label.name)}</div>
-            ${source ? `<div class="live-row-source">${escapeHtml(source)}</div>` : ""}
+            <div class="live-row-meta">${label.number ? `<span class="live-row-number">${escapeHtml(label.number)}</span>` : ""}${source ? `<span class="live-row-source">${escapeHtml(source)}</span>` : ""}</div>
           </div>
           <button class="live-star focusable${isFavorite ? " is-favorite" : ""}"
                   data-action="toggleFavorite"
@@ -875,6 +926,9 @@ export function createLiveScreenMethods02() {
           this.container.querySelector(".live-body")?.appendChild(nextList);
         }
         ScreenUtils.indexFocusables(this.container);
+        // Real render (data arrival / search typing / favourite toggles):
+        // re-measure once so the keypress path keeps using fresh cached offsets.
+        this.cacheLayoutMetrics?.();
         this.bindSearchInput();
         this.applyFocusState();
         this.updateHeroForFocus({ force: true });

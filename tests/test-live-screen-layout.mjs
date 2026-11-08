@@ -387,13 +387,20 @@ describe("Android TV reference layout (source contract)", () => {
     "utf8"
   );
 
-  test("a hero panel on top: badge, preview box, no invented EPG", () => {
+  test("a hero panel on top: logo, channel line, title, source, search control, preview; no invented EPG", () => {
     assert.match(renderSource, /live-hero\b/);
-    assert.match(renderSource, /live-hero-badge/);
-    assert.match(renderSource, /EN VIVO/);
+    assert.match(renderSource, /live-hero-logo/);
+    assert.match(renderSource, /live-hero-number/);
+    assert.match(renderSource, /live-hero-channel/);
+    assert.match(renderSource, /live-hero-name/);
+    assert.match(renderSource, /live-hero-source/);
     assert.match(renderSource, /live-hero-preview/);
-    assert.match(renderSource, /Sin información de programa/);
-    // No EPG: no progress bar, no fake times.
+    assert.match(renderSource, /data-action="openSearch"/);
+    // No EPG: no badge (we cannot know when the programme is on air), no
+    // programme info line, no progress bar, no fake times.
+    assert.doesNotMatch(renderSource, /live-hero-badge/);
+    assert.doesNotMatch(renderSource, /EN VIVO/);
+    assert.doesNotMatch(renderSource, /live-hero-noprogram/);
     assert.doesNotMatch(renderSource, /live-hero-progress/);
   });
 
@@ -412,13 +419,20 @@ describe("Android TV reference layout (source contract)", () => {
     assert.match(renderSource, /›/);
   });
 
-  test("the rail is the narrow left column (~21%) next to the channel list", () => {
-    assert.match(renderSource, /\.live-rail\s*\{[^}]*flex:\s*0\s+0\s+21%/);
+  test("the rail is a fixed-px narrow left column next to the channel list", () => {
+    // Static layout: the rail width is a px constant, never a percentage that
+    // could recompute when the body's content or scrollbars change.
+    assert.match(renderSource, /\.live-rail\s*\{[^}]*flex:\s*0\s+0\s+\d+px/);
     assert.match(renderSource, /live-channel-list/);
   });
 
-  test("focused rows use the white rounded outline of the reference", () => {
-    assert.match(renderSource, /outline:\s*3px solid\s*(var\(--secondary-color, ?)?#f+f/i);
+  test("focus is a #303030 fill plus a 2px white ring painted INSIDE the element", () => {
+    // No scale, no elevation, no layout change: the focus state only swaps a
+    // fill and an inner ring, never geometry.
+    assert.match(renderSource, /\.live-rail-row\.focused\s*\{[^}]*#303030/);
+    assert.match(renderSource, /\.live-rail-row\s*\{[^}]*outline:\s*2px solid transparent[^}]*outline-offset:\s*-2px/);
+    assert.match(renderSource, /\.live-channel-row\.focused\s*\{[^}]*#303030/);
+    // Only a short background-color fade is allowed.
     assert.match(renderSource, /transition:\s*background-color/);
   });
 
@@ -461,6 +475,148 @@ describe("Android TV reference layout (source contract)", () => {
 
   test("the mount module keeps the background preload that feeds per-category counts", () => {
     assert.match(mountSource, /preloadRemainingCategories/);
+  });
+});
+
+describe("static layout contract (no reflow on focus)", () => {
+  const renderSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-02-render.js", import.meta.url),
+    "utf8"
+  );
+  const tuneSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-03-tune-in.js", import.meta.url),
+    "utf8"
+  );
+  const mountSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-01-mount-and-load.js", import.meta.url),
+    "utf8"
+  );
+
+  const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const styleStart = renderSource.indexOf('<style id="live-screen-style">');
+  const styleEnd = renderSource.indexOf("</style>", styleStart);
+  assert.ok(styleStart >= 0 && styleEnd > styleStart, "the live screen ships its stylesheet inline");
+  const style = renderSource.slice(styleStart, styleEnd);
+
+  // Body of one CSS rule, matched exactly (a selector followed directly by '{').
+  const ruleBody = (selector) => {
+    const match = style.match(new RegExp(`${escapeRegex(selector)}\\s*\\{([^}]*)\\}`));
+    assert.ok(match, `CSS rule ${selector} exists`);
+    return match[1];
+  };
+
+  test("fixed geometry: hero height, 16:9 preview, px rail width, fixed row and header heights", () => {
+    const hero = ruleBody(".live-hero");
+    assert.match(hero, /(?<!min-)height:\s*\d+px/);
+    assert.doesNotMatch(hero, /min-height/);
+    const preview = ruleBody(".live-hero-preview");
+    assert.match(preview, /(?<!min-)width:\s*\d+px/);
+    assert.match(preview, /(?<!min-)height:\s*\d+px/);
+    const rail = ruleBody(".live-rail");
+    assert.match(rail, /flex:\s*0\s+0\s+\d+px/);
+    assert.doesNotMatch(rail, /\d+%/);
+    const railRow = ruleBody(".live-rail-row");
+    assert.match(railRow, /(?<!min-)height:\s*\d+px/);
+    assert.doesNotMatch(railRow, /min-height/);
+    const category = ruleBody(".live-rail-category");
+    assert.match(category, /(?<!min-)height:\s*\d+px/);
+    assert.doesNotMatch(category, /min-height/);
+    const row = ruleBody(".live-channel-row");
+    assert.match(row, /(?<!min-)height:\s*\d+px/);
+    assert.doesNotMatch(row, /min-height/);
+  });
+
+  test("channel names use a fixed line-height and a 2-line clamp so long names never reflow", () => {
+    const name = ruleBody(".live-row-name");
+    assert.match(name, /line-height:\s*\d+px/);
+    assert.match(name, /-webkit-line-clamp:\s*2/);
+    assert.match(name, /overflow:\s*hidden/);
+    assert.doesNotMatch(name, /white-space:\s*nowrap/);
+  });
+
+  test("no size transitions: only background-color, opacity and transform may transition", () => {
+    const declarations = style.match(/transition:[^;}]*/g) || [];
+    assert.ok(declarations.length > 0, "the stylesheet declares transitions");
+    const allowed = new Set(["background-color", "opacity", "transform"]);
+    for (const declaration of declarations) {
+      const properties = declaration
+        .replace(/^transition:/, "")
+        .split(",")
+        .map((part) => part.trim().split(/\s+/)[0])
+        .filter(Boolean);
+      assert.ok(properties.length > 0, `transition declares properties: ${declaration}`);
+      for (const property of properties) {
+        assert.ok(
+          allowed.has(property),
+          `transition property "${property}" is not allowed (size properties must never transition): ${declaration}`
+        );
+      }
+    }
+  });
+
+  test("the hero is patched in place: focus moves only write textContent into existing nodes", () => {
+    const start = renderSource.indexOf("updateHeroForFocus({ force = false }");
+    const end = renderSource.indexOf("patchHeroImage(", start);
+    assert.ok(start >= 0 && end > start, "updateHeroForFocus exists before patchHeroImage");
+    const heroPath = renderSource.slice(start, end);
+    assert.match(heroPath, /textContent/);
+    assert.doesNotMatch(heroPath, /innerHTML/);
+    assert.doesNotMatch(heroPath, /replaceWith|removeChild|appendChild|insertAdjacentHTML|renderHero/);
+  });
+
+  test("scroll decisions read cached offsets, never per-keypress DOM measurement", () => {
+    const start = tuneSource.indexOf("ensureFocusVisible(");
+    const end = tuneSource.indexOf("animateListScroll(", start);
+    assert.ok(start >= 0 && end > start, "ensureFocusVisible exists before animateListScroll");
+    const scrollPath = tuneSource.slice(start, end);
+    for (const banned of ["getBoundingClientRect", "offsetTop", "offsetHeight", "clientHeight", "scrollHeight"]) {
+      assert.doesNotMatch(scrollPath, new RegExp(banned));
+    }
+    // The cache exists and is rebuilt after each real render: initial render,
+    // data refresh (updateRowsOnly), source expand/collapse and window resize.
+    assert.match(tuneSource, /cacheLayoutMetrics/);
+    assert.ok((renderSource.match(/cacheLayoutMetrics/g) || []).length >= 2, "render and updateRowsOnly rebuild the cache");
+    assert.match(tuneSource, /toggleSource[\s\S]*cacheLayoutMetrics/);
+    assert.match(mountSource, /addEventListener\(\s*["']resize["']/);
+    assert.match(mountSource, /cacheLayoutMetrics/);
+    // The keypress handler itself never measures and never sends per-key
+    // telemetry: it may only change state, toggle classes, patch the hero
+    // and scroll.
+    const keydownStart = tuneSource.indexOf("onKeyDown(event)");
+    const keydownEnd = tuneSource.indexOf("handleHorizontal(delta)", keydownStart);
+    assert.ok(keydownStart >= 0 && keydownEnd > keydownStart, "onKeyDown exists before handleHorizontal");
+    const keydownPath = tuneSource.slice(keydownStart, keydownEnd);
+    for (const banned of ["getBoundingClientRect", "offsetTop", "clientHeight", "scrollHeight", "liveFocusSnapshot"]) {
+      assert.doesNotMatch(keydownPath, new RegExp(banned));
+    }
+  });
+
+  test("the shell fills the screen; rail and list are shrinkable flex children", () => {
+    const shell = ruleBody(".live-shell");
+    assert.match(shell, /inset:\s*0/);
+    assert.match(shell, /overflow:\s*hidden/);
+    const body = ruleBody(".live-body");
+    assert.match(body, /min-height:\s*0/);
+    assert.match(body, /min-width:\s*0/);
+    const rail = ruleBody(".live-rail");
+    assert.match(rail, /min-height:\s*0/);
+    assert.match(rail, /min-width:\s*0/);
+    const list = ruleBody(".live-channel-list");
+    assert.match(list, /min-height:\s*0/);
+    assert.match(list, /min-width:\s*0/);
+    assert.match(list, /overflow-y:\s*auto/);
+  });
+
+  test("late-loading logos cannot shift layout: reserved fixed boxes with object-fit contain", () => {
+    const rowLogo = ruleBody(".live-row-logo");
+    assert.match(rowLogo, /(?<!min-)width:\s*\d+px/);
+    assert.match(rowLogo, /(?<!min-)height:\s*\d+px/);
+    assert.match(style, /\.live-row-logo img\s*\{[^}]*object-fit:\s*contain/);
+    const heroLogo = ruleBody(".live-hero-logo");
+    assert.match(heroLogo, /(?<!min-)width:\s*\d+px/);
+    assert.match(heroLogo, /(?<!min-)height:\s*\d+px/);
+    assert.match(style, /\.live-hero-logo img\s*\{[^}]*object-fit:\s*contain/);
+    assert.match(style, /\.live-hero-preview img\s*\{[^}]*object-fit:\s*contain/);
   });
 });
 

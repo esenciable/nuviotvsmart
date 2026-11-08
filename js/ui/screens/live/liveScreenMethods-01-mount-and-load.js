@@ -76,6 +76,11 @@ export function createLiveScreenMethods01() {
 
       this.render({ preserveFocus: false });
 
+      // Window resizes are the only geometry change outside renders: refresh
+      // the cached layout offsets once per resize (never per keypress).
+      this.onLiveResize = () => this.cacheLayoutMetrics?.();
+      window.addEventListener("resize", this.onLiveResize);
+
       // One controller per mount covers the categories call; switching
       // categories and tuning each own their dedicated controller below.
       const categoriesController = typeof AbortController === "function" ? new AbortController() : null;
@@ -337,6 +342,10 @@ export function createLiveScreenMethods01() {
       this.categoryLoadController = null;
       this.resolveController = null;
       this.clearNoticeTimer();
+      if (this.onLiveResize && typeof window?.removeEventListener === "function") {
+        window.removeEventListener("resize", this.onLiveResize);
+      }
+      this.onLiveResize = null;
       this.notice = "";
       this.tuningChannelId = "";
       this.heroChannel = null;

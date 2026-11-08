@@ -10,21 +10,6 @@ const NOTICE_VISIBLE_MS = 6000;
 const MOVE_CADENCE_MS = 90;
 const SCROLL_ANIMATE_MS = 110;
 
-// Temporary focal telemetry: a TV gives no logs, and "navigation does not work"
-// can mean no movement, a double move from two handlers, or the wrong target.
-// Every key reports what the screen actually did so the next fix is measured.
-function reportLiveNav(payload) {
-  try {
-    void import("../../../core/diagnostics/runtimeBeacon.js")
-      .then((mod) => mod.sendRuntimeBeacon({ phase: "live-nav", ...payload }))
-      .catch(() => {});
-  } catch (_) {
-    // Diagnostics are optional.
-  }
-}
-
-// Errors must never be silent on a TV (no logs): every guarded handler reports
-// through the runtime beacon with the message and a short stack head.
 function reportLiveErrorSafe(error, where) {
   try {
     const message = String(error?.message || error || "unknown error");
@@ -39,22 +24,6 @@ function reportLiveErrorSafe(error, where) {
   } catch (_) {
     // Diagnostics are optional.
   }
-}
-
-function liveFocusSnapshot(container) {
-  const focused = container?.querySelector(".focusable.focused");
-  const rail = container?.querySelector(".live-rail");
-  const list = container?.querySelector(".live-channel-list");
-  const size = (el) => (el ? `${Math.round(el.scrollHeight)}/${Math.round(el.clientHeight)}` : "x");
-  return {
-    focus: focused
-      ? `${focused.dataset.action || "?"}:${focused.dataset.railIndex || focused.dataset.rowIndex || focused.dataset.focusKey || "?"}`
-      : "none",
-    rail: rail ? Math.round(rail.scrollTop) : -1,
-    list: list ? Math.round(list.scrollTop) : -1,
-    railSize: size(rail),
-    listSize: size(list)
-  };
 }
 
 // Key handling, activation and tune-in for the reference layout. Focus is a
@@ -77,14 +46,10 @@ export function createLiveScreenMethods03() {
     onKeyDown(event) {
       try {
         const code = Number(event?.keyCode || 0);
-        if ((code >= 37 && code <= 40) || code === 13) {
-          reportLiveNav({ key: code, repeat: Boolean(event?.repeat), before: liveFocusSnapshot(this.container) });
-        }
         if (isBackEvent(event)) {
           event?.preventDefault?.();
           if (this.searchActive) {
             this.exitSearch();
-            reportLiveNav({ after: liveFocusSnapshot(this.container), search: "exit" });
             return;
           }
           Router.back();
@@ -108,7 +73,6 @@ export function createLiveScreenMethods03() {
         } else {
           return;
         }
-        reportLiveNav({ key: code, after: liveFocusSnapshot(this.container) });
       } catch (error) {
         reportLiveErrorSafe(error, "onKeyDown");
       }
@@ -187,11 +151,8 @@ export function createLiveScreenMethods03() {
 
     handleEnter() {
       if (this.focusZone === "hero") {
-        if ((this.heroIndex || 0) === 0) {
-          this.openSearch();
-        } else {
-          this.showGuideNotice();
-        }
+        // The hero has a single control: the search (gear) control.
+        this.openSearch();
         return;
       }
       if (this.focusZone === "rows") {
@@ -286,6 +247,9 @@ export function createLiveScreenMethods03() {
       toggleSourceCollapsed(collapsedSourceIdsRef(), railId);
       if (this.toggleSourceRowsInPlace(item, willExpand)) {
         this.reindexRailDom();
+        // The rail's geometry changed (rows inserted/removed): refresh the
+        // cached offsets once so the next keypress still uses the cache.
+        this.cacheLayoutMetrics?.();
         this.applyFocusState({ smooth: true });
         return;
       }
@@ -403,15 +367,41 @@ export function createLiveScreenMethods03() {
     },
 
     // Guide ------------------------------------------------------------------
-    showGuideNotice() {
-      // Honest answer only: there is no EPG source yet, so there is no guide
-      // screen to open and no date to promise.
-      this.showNotice(t("live_guide_unavailable", {}, "La guía de programas necesita datos EPG y todavía no está disponible"));
+    // No EPG source exists, so there is no guide control on the hero and no
+    // guide screen to open.
+
+    // Layout metrics cache --------------------------------------------------
+    // THE fluidity rule: no DOM measurement per keypress. After each real
+    // render, after expand/collapse and on resize, the focusable rows' offsets
+    // (relative to their scroll panel, via offsetParent) plus each panel's
+    // clientHeight/scrollHeight are cached here. The move handler only reads
+    // this cache — never getBoundingClientRect, offsetTop or clientHeight.
+    cacheLayoutMetrics() {
+      try {
+        const container = this.container;
+        if (!container) return;
+        const metrics = new Map();
+        for (const panel of container.querySelectorAll(".live-rail, .live-channel-list")) {
+          const rows = new Map();
+          for (const node of panel.querySelectorAll(".focusable")) {
+            rows.set(node, { top: node.offsetTop, height: node.offsetHeight });
+          }
+          metrics.set(panel, {
+            rows,
+            viewHeight: panel.clientHeight,
+            scrollRange: Math.max(0, panel.scrollHeight - panel.clientHeight)
+          });
+        }
+        this.layoutMetrics = metrics;
+      } catch (error) {
+        reportLiveErrorSafe(error, "cacheLayoutMetrics");
+      }
     },
 
-    // Keep the focused node inside its panel (rail or channel list) by the
-    // smallest movement that makes it fully visible, animated over a short
-    // ease so held keys never lag behind the scroll.
+    // Keep the focused node inside its panel (rail or channel list) using ONLY
+    // the cached offsets: the smallest movement that makes it fully visible,
+    // animated over a short ease so held keys never lag behind the scroll.
+    // A keypress must never trigger a DOM measurement here.
     ensureFocusVisible({ smooth = true } = {}) {
       try {
         const focused = this.container?.querySelector(".focusable.focused");
@@ -422,24 +412,30 @@ export function createLiveScreenMethods03() {
         if (!panel) {
           return;
         }
-        const panelRect = panel.getBoundingClientRect();
-        const rect = focused.getBoundingClientRect();
+        const panelMetrics = this.layoutMetrics instanceof Map ? this.layoutMetrics.get(panel) : null;
+        const entry = panelMetrics?.rows instanceof Map ? panelMetrics.rows.get(focused) : null;
+        if (!entry) {
+          // No cached entry for this node yet (it appears with the next real
+          // render / recache). Doing nothing keeps the keypress cheap; it can
+          // never trigger a per-move measurement.
+          return;
+        }
         const margin = 16;
+        const top = Number(panel.scrollTop) || 0;
         let delta = 0;
-        if (rect.top < panelRect.top + margin) {
-          delta = rect.top - panelRect.top - margin;
-        } else if (rect.bottom > panelRect.bottom - margin) {
-          delta = rect.bottom - panelRect.bottom + margin;
+        if (entry.top < top + margin) {
+          delta = entry.top - top - margin;
+        } else if (entry.top + entry.height > top + panelMetrics.viewHeight - margin) {
+          delta = entry.top + entry.height - top - panelMetrics.viewHeight + margin;
         }
         if (!delta) {
           return;
         }
-        const maxTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
-        const top = Math.min(maxTop, Math.max(0, panel.scrollTop + delta));
+        const target = Math.min(panelMetrics.scrollRange, Math.max(0, top + delta));
         if (smooth) {
-          this.animateListScroll(panel, top);
+          this.animateListScroll(panel, target);
         } else {
-          panel.scrollTop = top;
+          panel.scrollTop = target;
         }
       } catch (error) {
         reportLiveErrorSafe(error, "ensureFocusVisible");
@@ -485,12 +481,21 @@ export function createLiveScreenMethods03() {
         outcomes.push({ ok, w: img.naturalWidth || 0, src: String(img.currentSrc || img.src || "").slice(-28) });
         pending -= 1;
         if (pending > 0) return;
-        reportLiveNav({
-          phase: "logos",
-          total: images.length,
-          ok: outcomes.filter((o) => o.ok).length,
-          sample: outcomes.slice(0, 3)
-        });
+        try {
+          void import("../../../core/diagnostics/runtimeBeacon.js")
+            .then((mod) =>
+              mod.sendRuntimeBeacon({
+                phase: "live-nav",
+                kind: "logos",
+                total: images.length,
+                ok: outcomes.filter((o) => o.ok).length,
+                sample: outcomes.slice(0, 3)
+              })
+            )
+            .catch(() => {});
+        } catch (_) {
+          // Diagnostics are optional.
+        }
       };
       images.forEach((img) => {
         if (img.complete) {
@@ -502,7 +507,13 @@ export function createLiveScreenMethods03() {
       });
       setTimeout(() => {
         if (pending > 0) {
-          reportLiveNav({ phase: "logos", total: images.length, stalled: pending });
+          try {
+            void import("../../../core/diagnostics/runtimeBeacon.js")
+              .then((mod) => mod.sendRuntimeBeacon({ phase: "live-nav", stalled: pending }))
+              .catch(() => {});
+          } catch (_) {
+            // Diagnostics are optional.
+          }
         }
       }, 8000);
     },
