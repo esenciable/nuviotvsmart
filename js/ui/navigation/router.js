@@ -1,4 +1,5 @@
 import { HomeScreen } from "../screens/home/homeScreen.js";
+import { LiveScreen } from "../screens/live/liveScreen.js";
 import { PlayerScreen } from "../screens/player/playerScreen.js";
 import { AccountScreen } from "../screens/account/accountScreen.js";
 import { AuthQrSignInScreen } from "../screens/account/authQrSignInScreen.js";
@@ -39,6 +40,7 @@ import { createRouterMethods03 } from "./routerMethods-03-back.js";
 export {
   Router,
   HomeScreen,
+  LiveScreen,
   PlayerScreen,
   AccountScreen,
   AuthQrSignInScreen,
@@ -166,6 +168,7 @@ Object.assign(Router, {
   pendingPostPlayNavigation: null,
   routes: {
     home: HomeScreen,
+    live: LiveScreen,
     player: PlayerScreen,
     account: AccountScreen,
     authQrSignIn: AuthQrSignInScreen,

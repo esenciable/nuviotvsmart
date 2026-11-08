@@ -23,6 +23,14 @@ export const ROOT_SIDEBAR_ITEMS = [
       '<path d="M12 3.2 3.5 10v10.25c0 .69.56 1.25 1.25 1.25h5.5v-6.5h3.5v6.5h5.5c.69 0 1.25-.56 1.25-1.25V10L12 3.2Zm0 1.92 7 5.6v9.53h-4v-6.5H9v6.5H5v-9.53l7-5.6Z"/>'
   },
   {
+    action: "gotoLive",
+    route: "live",
+    labelKey: "sidebar.live",
+    iconType: "svg",
+    viewBox: "0 0 24 24",
+    iconMarkup: '<path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"/>'
+  },
+  {
     action: "gotoSearch",
     route: "search",
     labelKey: "sidebar.search",
