@@ -122,7 +122,9 @@ export function createLiveScreenMethods01() {
           this.setRailFocusIndex(0);
           this.applyFocusState?.();
         } else {
-          // First visit (no memory): today's default — the first category.
+          // First visit (no memory) — and a remembered removed aggregate id,
+          // which restore resolves to no memory — lands on today's default:
+          // the first category of the first source that has categories.
           const first = this.railItems().find((item) => item.type === "category");
           if (first) {
             this.selectRailItem(first.railId, { enterRows: false });
@@ -197,15 +199,15 @@ export function createLiveScreenMethods01() {
     },
 
     // True when the visible list reads from the UNION of the cached
-    // per-category lists (search, favourites, all) rather than one category,
+    // per-category lists (search, favourites) rather than one category,
     // so a background cache arrival must refresh the visible rows and the
-    // rail counts.
+    // rail counts. There is no aggregate selection anymore.
     listDependsOnAllCaches() {
       if (this.searchActive && this.searchQuery) {
         return true;
       }
       const selection = String(this.railSelection ?? "");
-      return selection === internals.RAIL_ALL_ID || selection === internals.RAIL_FAVORITES_ID;
+      return selection === internals.RAIL_FAVORITES_ID;
     },
 
     // Recomputes this.channels from the current rail selection / search state
@@ -226,15 +228,7 @@ export function createLiveScreenMethods01() {
         this.channels = Array.from(union.values()).filter((channel) => internals.channelMatchesQuery(channel, this.searchQuery));
       } else {
         const selection = String(this.railSelection ?? "");
-        if (selection === internals.RAIL_ALL_ID) {
-          const union = new Map();
-          for (const list of caches.values()) {
-            for (const channel of Array.isArray(list) ? list : []) {
-              if (!union.has(String(channel?.id))) union.set(String(channel?.id), channel);
-            }
-          }
-          this.channels = Array.from(union.values());
-        } else if (selection === internals.RAIL_FAVORITES_ID) {
+        if (selection === internals.RAIL_FAVORITES_ID) {
           const union = new Map();
           for (const list of caches.values()) {
             for (const channel of Array.isArray(list) ? list : []) {
@@ -282,7 +276,7 @@ export function createLiveScreenMethods01() {
       if (item.type === "category") {
         void this.loadChannelsForCategory(item.columnId, { background: false });
       } else {
-        // favorites / recents / all: pure cache recompute, no network.
+        // favorites / recents: pure cache recompute, no network.
         this.refreshVisibleChannels();
       }
       this.clampRowIndex();
@@ -299,9 +293,12 @@ export function createLiveScreenMethods01() {
     },
 
     // Sequential background preload: the portal measures ~150 ms per call and
-    // 2 calls per category, so one category at a time keeps the pace gentle
-    // while making later category switches instant from cache and filling the
-    // rail's per-category counts.
+    // 2 calls per category, so one category at a time (single await per
+    // iteration, no queue, no unbounded work) keeps the pace gentle while
+    // making later category switches instant from cache and filling the
+    // rail's per-category counts. The mount token stops it the moment the
+    // screen is left, and each arrival only refreshes the visible rows when
+    // the current selection actually reads from the caches.
     async preloadRemainingCategories(token) {
       for (const category of this.categories || []) {
         if (token !== this.loadToken || Router.getCurrent() !== "live") {
@@ -359,7 +356,6 @@ export function createLiveScreenMethods01() {
       }
       if (id === internals.RAIL_FAVORITES_ID) return Array.isArray(this.favoriteIds) ? this.favoriteIds.length : 0;
       if (id === internals.RAIL_RECENTS_ID) return Array.isArray(this.recentChannels) ? this.recentChannels.length : 0;
-      if (id === internals.RAIL_ALL_ID) return this.unionCachedChannels().length;
       return 0;
     },
 
@@ -385,7 +381,7 @@ export function createLiveScreenMethods01() {
       if (item.type === "category") {
         void this.loadChannelsForCategory(item.columnId, { background: false });
       } else {
-        // favorites / recents / all: pure cache recompute, no network.
+        // favorites / recents: pure cache recompute, no network.
         this.refreshVisibleChannels();
       }
       this.clampRowIndex();

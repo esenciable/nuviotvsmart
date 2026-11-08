@@ -27,7 +27,6 @@ export {
   RAIL_SEARCH_ID,
   RAIL_FAVORITES_ID,
   RAIL_RECENTS_ID,
-  RAIL_ALL_ID,
   categoryRailId,
   sourceRailIdFromColumnId,
   RECENTS_STORAGE_KEY,

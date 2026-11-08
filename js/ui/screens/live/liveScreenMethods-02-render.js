@@ -7,12 +7,14 @@ import * as internals from "./liveScreen.js";
 // categories next to the channel rows.
 //
 // The rail reads, top to bottom: Buscar (search), Favoritos (always),
-// Vistos recientemente (only when non-empty), Todos los canales (merged
-// total), then ONE collapsible section per SOURCE (MAGIS / PREMIUMTV) with the
-// source's own count and its indented category rows (name left, count right).
+// Vistos recientemente (only when non-empty), then ONE collapsible section
+// per SOURCE (MAGIS / PREMIUMTV) with the source's own count and its
+// indented category rows (name left, count right).
 // Category counts come from the per-category channel lists the screen already
 // loads — never from extra portal calls; a pending list renders "…" and its
 // source's count stays "…" until every one of its categories is cached.
+// There is NO aggregate "all channels" row: nothing here may load or
+// merge every category on demand.
 //
 // We have no EPG: the hero shows the source name where the reference shows the
 // time range, the muted line "Sin información de programa", and NO progress
@@ -295,7 +297,11 @@ export function queryLineView(query) {
 export const RAIL_SEARCH_ID = "__search__";
 export const RAIL_FAVORITES_ID = "__favorites__";
 export const RAIL_RECENTS_ID = "__recents__";
-export const RAIL_ALL_ID = "__all__";
+// The aggregate "all channels" row was REMOVED (it loaded every category
+// of every source and made the whole screen slow). No rail id exists for it
+// anymore; the legacy id below is only so a persisted remembered selection
+// restores to the default instead of hunting for a vanished row.
+const LEGACY_AGGREGATE_RAIL_ID = "__all__";
 
 export function categoryRailId(columnId) {
   return `cat:${String(columnId ?? "")}`;
@@ -389,6 +395,9 @@ export function resolveLiveSelectionRestore(items, remembered, channelCount = 0)
   if (!remembered) return null;
   const list = Array.isArray(items) ? items : [];
   const railId = String(remembered.railId ?? "");
+  // A remembered removed aggregate id is treated as no memory at all: the
+  // caller applies its own default (the first category of the first source).
+  if (railId === LEGACY_AGGREGATE_RAIL_ID) return null;
   const rowIndex = Math.max(0, Math.trunc(Number(remembered.rowIndex) || 0));
   if (railId) {
     const index = list.findIndex((item) => item?.railId === railId);
@@ -409,7 +418,7 @@ export function resolveLiveSelectionRestore(items, remembered, channelCount = 0)
 }
 
 // The flat focus order of the LEFT RAIL for the current state:
-//   [search] [favorites] [recents?] [all] [source header, its categories]...
+//   [search] [favorites] [recents?] [source header, its categories]...
 // Counts are read from the per-category caches ONLY (no extra portal calls):
 // a category with no cached list yet is `loading: true` with count `null`,
 // and its source's count stays `null` ("…") until every one of its
@@ -424,20 +433,6 @@ export function buildRailItems({ categories = [], channelsByColumn = new Map(), 
   if (recents > 0) {
     items.push({ type: "recents", railId: RAIL_RECENTS_ID, label: "Vistos recientemente", count: recents });
   }
-
-  // Todos los canales: the deduplicated union of every cached list.
-  const union = new Map();
-  for (const list of caches.values()) {
-    for (const channel of Array.isArray(list) ? list : []) {
-      if (!union.has(String(channel?.id))) union.set(String(channel?.id), channel);
-    }
-  }
-  items.push({
-    type: "all",
-    railId: RAIL_ALL_ID,
-    label: "Todos los canales",
-    count: union.size > 0 ? union.size : null
-  });
 
   // ONE section per source, in first-appearance order over the merged
   // categories; each keeps its own category rows in feed order.
@@ -903,14 +898,14 @@ export function createLiveScreenMethods02() {
             if (item.type === "category") {
               return this.renderRailCategory(item, index);
             }
-            // favorites / recents / all
+            // favorites / recents (fixed rows)
             return `
               <div class="live-rail-row focusable"
                    role="button"
                    data-action="selectRail"
                    data-rail-id="${escapeHtml(item.railId)}"
                    data-rail-index="${index}">
-                <span class="live-rail-icon" aria-hidden="true">${item.type === "favorites" ? "★" : item.type === "recents" ? "↺" : "☰"}</span>
+                <span class="live-rail-icon" aria-hidden="true">${item.type === "favorites" ? "★" : "↺"}</span>
                 <span class="live-rail-label">${escapeHtml(item.label)}</span>
                 <span class="live-rail-count">${escapeHtml(countLabel(item.count))}</span>
               </div>

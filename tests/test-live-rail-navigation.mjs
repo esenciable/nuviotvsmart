@@ -1,12 +1,12 @@
 // Navigation contract for the Live TV LEFT RAIL (pure helpers, no DOM, no
 // network — node --test must run fully offline).
 //
-// The rail's flat item list ([search] [favorites] [recents?] [all]
+// The rail's flat item list ([search] [favorites] [recents?]
 // [source header, its category rows]...) is the single source of truth for
 // up/down movement. These tests pin:
 //   1. building the item list from mixed state (empty favourites, no recents,
 //      a collapsed source contributing no category rows, all sources
-//      collapsed),
+//      collapsed) WITHOUT the removed aggregate "Todos los canales" row,
 //   2. index-based movement clamped at both ends (no wrap, no jump),
 //   3. the collapse-removes-focused-item fallback to that source's header,
 //   4. first/last boundary behaviour (UP at first -> stays so the handler can
@@ -26,7 +26,6 @@ import {
   RAIL_SEARCH_ID,
   RAIL_FAVORITES_ID,
   RAIL_RECENTS_ID,
-  RAIL_ALL_ID,
   categoryRailId
 } from "../js/ui/screens/live/liveScreenMethods-02-render.js";
 
@@ -72,14 +71,26 @@ const caches = new Map([
 ]);
 
 describe("buildRailItems from mixed state (the movement list)", () => {
-  test("empty favourites and no recents: no recents row, Favoritos still present with count 0", () => {
+  test("empty favourites and no recents: no recents row, Favoritos still present with count 0, and NO aggregate row", () => {
     const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
     assert.deepEqual(
       items.filter((item) => item.type !== "category").map((item) => item.railId),
-      [RAIL_SEARCH_ID, RAIL_FAVORITES_ID, RAIL_ALL_ID, "source:Magis", "source:PremiumTV"]
+      [RAIL_SEARCH_ID, RAIL_FAVORITES_ID, "source:Magis", "source:PremiumTV"]
     );
     assert.equal(items.find((item) => item.railId === RAIL_FAVORITES_ID).count, 0);
     assert.equal(items.some((item) => item.railId === RAIL_RECENTS_ID), false);
+  });
+
+  test("the removed aggregate row never appears, whatever the state", () => {
+    for (const favoriteCount of [0, 2]) {
+      for (const recentCount of [0, 1]) {
+        for (const cacheState of [caches, new Map()]) {
+          const items = buildRailItems({ categories, channelsByColumn: cacheState, favoriteCount, recentCount });
+          assert.equal(items.some((item) => item.railId === "__all__"), false);
+          assert.equal(items.some((item) => item.type === "all"), false);
+        }
+      }
+    }
   });
 
   test("a collapsed source contributes NO category rows to the movement list (but keeps them on its section)", () => {
@@ -105,7 +116,7 @@ describe("buildRailItems from mixed state (the movement list)", () => {
       const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 2, recentCount: 1 });
       assert.deepEqual(
         items.map((item) => item.railId),
-        [RAIL_SEARCH_ID, RAIL_FAVORITES_ID, RAIL_RECENTS_ID, RAIL_ALL_ID, "source:Magis", "source:PremiumTV"]
+        [RAIL_SEARCH_ID, RAIL_FAVORITES_ID, RAIL_RECENTS_ID, "source:Magis", "source:PremiumTV"]
       );
       assert.equal(items.some((item) => item.type === "category"), false);
     });
@@ -309,6 +320,10 @@ describe("remembered Live selection (module-level memory, restore rules)", () =>
       });
     });
 
+    test("the removed aggregate id falls back to NO memory so mount applies the default (first category)", () => {
+      assert.equal(resolveLiveSelectionRestore(items, { railId: "__all__", rowIndex: 2 }, 3), null);
+    });
+
     test("no memory at all: null, so mount keeps today's first-category default", () => {
       assert.equal(resolveLiveSelectionRestore(items, null, 3), null);
       assert.equal(resolveLiveSelectionRestore(items, undefined, 3), null);
@@ -353,6 +368,47 @@ describe("source contract: the DOM renders exactly one row per model item", () =
     assert.ok(start >= 0 && end > start, "the rail renders a source branch before its category branch");
     const sourceBranch = renderSource.slice(start, end);
     assert.doesNotMatch(sourceBranch, /renderRailCategory/, "the source branch must not emit category rows inline");
+  });
+
+  test("the removed aggregate row is rendered nowhere and nothing references the aggregate id", () => {
+    // The row AND every on-demand full-catalog path are gone: the rail model
+    // builds no "all" item, the render module has no "Todos los canales"
+    // label/constant, and the mount module no longer selects or counts one.
+    assert.doesNotMatch(renderSource, /Todos los canales/);
+    assert.doesNotMatch(renderSource, /type:\s*"all"/);
+    assert.doesNotMatch(renderSource, /RAIL_ALL_ID\s*=/);
+    assert.doesNotMatch(tuneSource, /RAIL_ALL_ID|__all__/);
+    assert.doesNotMatch(mountSource, /RAIL_ALL_ID|__all__/);
+  });
+
+  test("the no-memory default selection is a real category (first category of the first source)", () => {
+    assert.match(mountSource, /find\(\(item\) => item\.type === "category"\)/);
+    // The remembered aggregate falls back to that same default: restore
+    // treats the removed id as no memory (pinned above), and the mount's
+    // no-memory branch selects the first category through the normal path.
+    const defaultStart = mountSource.indexOf("no memory");
+    const defaultEnd = mountSource.indexOf("preloadRemainingCategories", defaultStart);
+    const defaultBranch = mountSource.slice(defaultStart, defaultEnd);
+    assert.match(defaultBranch, /item\.type === "category"/);
+    assert.doesNotMatch(defaultBranch, /all/i);
+  });
+
+  test("the background warm-up stays sequential and abortable, and never loads on demand", () => {
+    // The warm-up keeps the per-category counts filled: ONE category at a
+    // time, guarded by the load token so leaving the screen stops it. Select
+    // paths consume caches only.
+    const preloadStart = mountSource.indexOf("preloadRemainingCategories(token)");
+    assert.ok(preloadStart >= 0, "the background preload is wired from mount");
+    const preloadEnd = mountSource.indexOf("// Favourites", preloadStart);
+    const preload = mountSource.slice(preloadStart, preloadEnd);
+    assert.match(preload, /for \(const category of this\.categories \|\| \[\]\)/, "sequential: one category per await");
+    assert.match(preload, /token !== this\.loadToken/, "abortable: the mount token stops the loop");
+    // Selecting any rail row must not iterate all categories to build a list.
+    const selectStart = mountSource.indexOf("selectRailItem(railId", 0);
+    const preloadDef = mountSource.indexOf("async preloadRemainingCategories", selectStart);
+    const selectPath = mountSource.slice(selectStart, preloadDef);
+    assert.ok(selectPath.includes("loadChannelsForCategory"), "category rows load their own list");
+    assert.doesNotMatch(selectPath, /for \(const .* of this\.categories/, "no iteration of all categories on selection");
   });
 
   test("movement is index-based over the current list and clamped (railMoveIndex in moveRail)", () => {

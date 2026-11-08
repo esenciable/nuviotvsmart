@@ -25,7 +25,6 @@ import {
   RAIL_SEARCH_ID,
   RAIL_FAVORITES_ID,
   RAIL_RECENTS_ID,
-  RAIL_ALL_ID,
   categoryRailId,
   buildRailItems,
   collapsedSourceIdsRef,
@@ -220,7 +219,7 @@ describe("recently watched (persisted last tuned channels)", () => {
   });
 });
 
-describe("buildRailItems (left column: search, favorites, recents, all, source sections)", () => {
+describe("buildRailItems (left column: search, favorites, recents, source sections — no aggregate row)", () => {
   const categories = [
     { columnId: 42, name: "Deportes" },
     { columnId: 43, name: "Noticias" },
@@ -232,7 +231,7 @@ describe("buildRailItems (left column: search, favorites, recents, all, source s
     ["premiumtv:El Salvador – TCS", [{ id: "premiumtv:x" }, { id: "premiumtv:y" }]]
   ]);
 
-  test("search first, then Favoritos (always), then Vistos recientemente only when non-empty, then Todos", () => {
+  test("search first, then Favoritos (always), then Vistos recientemente only when non-empty — and NO aggregate row", () => {
     const withRecents = buildRailItems({
       categories,
       channelsByColumn: caches,
@@ -241,7 +240,7 @@ describe("buildRailItems (left column: search, favorites, recents, all, source s
     });
     assert.deepEqual(
       withRecents.map((item) => item.railId),
-      [RAIL_SEARCH_ID, RAIL_FAVORITES_ID, RAIL_RECENTS_ID, RAIL_ALL_ID, "source:Magis", categoryRailId(42), categoryRailId(43), "source:PremiumTV", categoryRailId("premiumtv:El Salvador – TCS")]
+      [RAIL_SEARCH_ID, RAIL_FAVORITES_ID, RAIL_RECENTS_ID, "source:Magis", categoryRailId(42), categoryRailId(43), "source:PremiumTV", categoryRailId("premiumtv:El Salvador – TCS")]
     );
 
     const withoutRecents = buildRailItems({
@@ -253,11 +252,10 @@ describe("buildRailItems (left column: search, favorites, recents, all, source s
     assert.equal(withoutRecents.some((item) => item.railId === RAIL_RECENTS_ID), false);
   });
 
-  test("Todos carries the deduplicated union total of the cached lists", () => {
+  test("the removed 'Todos los canales' aggregate row exists nowhere, even with warm caches", () => {
     const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
-    const all = items.find((item) => item.railId === RAIL_ALL_ID);
-    // 4 magis + 2 premiumtv, no overlaps
-    assert.equal(all.count, 6);
+    assert.equal(items.some((item) => item.railId === "__all__"), false);
+    assert.equal(items.some((item) => item.type === "all"), false);
   });
 
   test("one section per SOURCE (not per category), in first-appearance order", () => {
@@ -309,9 +307,9 @@ describe("buildRailItems (left column: search, favorites, recents, all, source s
     );
   });
 
-  test("the rail never collapses to empty: search, favorites and all always exist", () => {
+  test("the rail never collapses to empty: search and favorites always exist", () => {
     const items = buildRailItems({ categories: [], channelsByColumn: new Map(), favoriteCount: 0, recentCount: 0 });
-    assert.deepEqual(items.map((item) => item.railId), [RAIL_SEARCH_ID, RAIL_FAVORITES_ID, RAIL_ALL_ID]);
+    assert.deepEqual(items.map((item) => item.railId), [RAIL_SEARCH_ID, RAIL_FAVORITES_ID]);
   });
 });
 
