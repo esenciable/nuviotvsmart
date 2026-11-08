@@ -475,6 +475,32 @@ describe("Android TV reference layout (source contract)", () => {
   });
 });
 
+describe("player Back exits playback without pushing a route (no re-open loop)", () => {
+  const playerSource = readFileSync(
+    new URL("../js/ui/screens/player/playerScreenMethods-70-on-pointer-activate.js", import.meta.url),
+    "utf8"
+  );
+
+  test("exitPlayerOnBack never pushes a fresh live navigate (the old push made history [live, player, live])", () => {
+    assert.doesNotMatch(
+      playerSource,
+      /Router\.navigate\(\s*["']live["']\s*,\s*\{\}\s*,\s*\{\s*isBackNavigation:\s*true\s*\}\s*\)/,
+      "a bare isBackNavigation navigate PUSHES a live entry on top of the player — the Back loop"
+    );
+  });
+
+  test("exitPlayerOnBack prefers the router's return-to-existing-route helper and reports the history traversal", () => {
+    assert.match(playerSource, /popToExistingRoute\?*\.?\(\s*["']live["']/);
+    assert.match(playerSource, /return\s+["']history["']/, "the caller must know a browser traversal is in flight");
+  });
+
+  test("the fallback consumes the player's own entry instead of pushing (skipStackPush + replaceHistory)", () => {
+    assert.match(playerSource, /skipStackPush:\s*true/);
+    assert.match(playerSource, /replaceHistory:\s*true/);
+    assert.match(playerSource, /isBackNavigation:\s*true/);
+  });
+});
+
 describe("static layout contract (no reflow on focus)", () => {
   const renderSource = readFileSync(
     new URL("../js/ui/screens/live/liveScreenMethods-02-render.js", import.meta.url),

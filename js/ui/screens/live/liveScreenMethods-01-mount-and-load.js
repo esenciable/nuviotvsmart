@@ -18,7 +18,8 @@ function clampRowIndexValue(index, length) {
 // Every repository call is abortable through a token + controller pair so
 // leaving the screen or switching categories cancels the pending work.
 export function createLiveScreenMethods01() {
-  const { Router, ScreenUtils, liveRepository } = internals;
+  const { Router, ScreenUtils, liveRepository, rememberLiveSelection, readRememberedLiveSelection, resolveLiveSelectionRestore } =
+    internals;
 
   return {
     async mount(params = {}, navigationContext = {}) {
@@ -104,12 +105,28 @@ export function createLiveScreenMethods01() {
       this.categories = Array.isArray(categories.data) ? categories.data : [];
       this.render();
       if (this.categories.length) {
-        // The first category shows its channels immediately (foreground load);
-        // everything else preloads in the background so the rail counts,
-        // search, favourites and recents see data as it arrives.
-        const first = this.railItems().find((item) => item.type === "category");
-        if (first) {
-          this.selectRailItem(first.railId, { enterRows: false });
+        // Restore WHERE the user was (the remembered rail id + focused row,
+        // module-level memory like the mobile app's LiveTvListMemory). It
+        // drives the SAME category load path as a manual selection — no extra
+        // loading, and the row focus is applied once the list paints.
+        const remembered = readRememberedLiveSelection();
+        const restore = remembered
+          ? resolveLiveSelectionRestore(this.railItems(), remembered, this.visibleCountForRailId(remembered.railId))
+          : null;
+        if (restore && restore.railId) {
+          this.restoreRailSelection(restore);
+        } else if (restore) {
+          // The remembered selection (and its whole source) is gone: land on
+          // the first rail item.
+          this.focusZone = "rail";
+          this.setRailFocusIndex(0);
+          this.applyFocusState?.();
+        } else {
+          // First visit (no memory): today's default — the first category.
+          const first = this.railItems().find((item) => item.type === "category");
+          if (first) {
+            this.selectRailItem(first.railId, { enterRows: false });
+          }
         }
         void this.preloadRemainingCategories(token);
       }
@@ -331,6 +348,53 @@ export function createLiveScreenMethods01() {
       return this.favoriteSet.has(id);
     },
 
+    // Row count the given rail id will show, read from the per-category
+    // caches and the recents/favourites snapshots only (no network). Used to
+    // clamp a restored row index before the selection paints the list.
+    visibleCountForRailId(railId) {
+      const id = String(railId ?? "");
+      if (id.startsWith("cat:")) {
+        const cached = this.channelsByColumn?.get?.(id.slice(4));
+        return Array.isArray(cached) ? cached.length : 0;
+      }
+      if (id === internals.RAIL_FAVORITES_ID) return Array.isArray(this.favoriteIds) ? this.favoriteIds.length : 0;
+      if (id === internals.RAIL_RECENTS_ID) return Array.isArray(this.recentChannels) ? this.recentChannels.length : 0;
+      if (id === internals.RAIL_ALL_ID) return this.unionCachedChannels().length;
+      return 0;
+    },
+
+    // Applies a resolved restore: selects the remembered rail through the
+    // SAME path as a manual selection, then restores the focused row (clamped
+    // again after the list paints, so a shorter list can never overshoot).
+    // A source-header fallback only focuses the header — selecting a header
+    // would COLLAPSE the source, never restore anything.
+    restoreRailSelection(restore) {
+      const items = this.railItems();
+      const item = items[restore.index];
+      if (!item) return false;
+      if (item.type === "source") {
+        this.focusZone = "rail";
+        this.rowIndex = 0;
+        this.rowFocusTarget = "row";
+        this.setRailFocusIndex(restore.index);
+        this.applyFocusState?.();
+        return true;
+      }
+      this.rowIndex = Math.max(0, Math.trunc(Number(restore.rowIndex) || 0));
+      this.railSelection = item.railId;
+      if (item.type === "category") {
+        void this.loadChannelsForCategory(item.columnId, { background: false });
+      } else {
+        // favorites / recents / all: pure cache recompute, no network.
+        this.refreshVisibleChannels();
+      }
+      this.clampRowIndex();
+      this.focusZone = "rows";
+      this.rowFocusTarget = "row";
+      this.applyFocusState?.();
+      return true;
+    },
+
     clampRowIndex() {
       const max = Math.max(0, (Array.isArray(this.channels) ? this.channels.length : 0) - 1);
       if (this.rowIndex > max) this.rowIndex = max;
@@ -339,6 +403,9 @@ export function createLiveScreenMethods01() {
 
     cleanup() {
       this.loadToken = (this.loadToken || 0) + 1;
+      // Remember WHERE the user was before the screen goes away (player visit,
+      // or leaving Live TV entirely) so the next mount restores the spot.
+      rememberLiveSelection({ railId: this.railSelection, rowIndex: this.rowIndex });
       this.categoriesController?.abort?.();
       this.categoryLoadController?.abort?.();
       this.resolveController?.abort?.();

@@ -38,6 +38,14 @@ import * as railModule from "../js/ui/screens/live/liveScreenMethods-02-render.j
 const railMoveIndex = railModule.railMoveIndex;
 const railFocusAfterChange = railModule.railFocusAfterChange;
 
+// Remembered-selection helpers resolve through the namespace too, so the RED
+// run fails per test instead of failing to link the module.
+const rememberLiveSelection = railModule.rememberLiveSelection;
+const readRememberedLiveSelection = railModule.readRememberedLiveSelection;
+const forgetLiveSelection = railModule.forgetLiveSelection;
+const resolveLiveSelectionRestore = railModule.resolveLiveSelectionRestore;
+const LIVE_SELECTION_STORAGE_KEY = railModule.LIVE_SELECTION_STORAGE_KEY;
+
 // The collapse set is a module-level singleton shared with the screen: every
 // collapsed-state test must restore it so tests stay order-independent.
 function withCollapsedSources(ids, run) {
@@ -203,6 +211,122 @@ describe("railFocusAfterChange (identity-based focus recovery when the list chan
     assert.equal(railFocusAfterChange(items, 7, null), 1);
     assert.equal(railFocusAfterChange(items, -3, null), 0);
     assert.equal(railFocusAfterChange([], 4, { railId: "a" }), 0);
+  });
+});
+
+describe("remembered Live selection (module-level memory, restore rules)", () => {
+  const memoryStorage = () => {
+    const map = new Map();
+    return {
+      getItem: (key) => (map.has(key) ? map.get(key) : null),
+      setItem: (key, value) => map.set(key, String(value)),
+      removeItem: (key) => map.delete(key)
+    };
+  };
+
+  test("helpers exist as exported pure helpers", () => {
+    assert.equal(typeof rememberLiveSelection, "function", "rememberLiveSelection must be exported");
+    assert.equal(typeof readRememberedLiveSelection, "function", "readRememberedLiveSelection must be exported");
+    assert.equal(typeof forgetLiveSelection, "function", "forgetLiveSelection must be exported");
+    assert.equal(typeof resolveLiveSelectionRestore, "function", "resolveLiveSelectionRestore must be exported");
+  });
+
+  test("remember stores the rail id and focused row; read returns a copy", () => {
+    forgetLiveSelection();
+    assert.equal(readRememberedLiveSelection(), null);
+    rememberLiveSelection({ railId: categoryRailId(42), rowIndex: 3 });
+    const remembered = readRememberedLiveSelection();
+    assert.deepEqual(remembered, { railId: categoryRailId(42), rowIndex: 3 });
+    // A copy, not the live singleton: mutating it must not corrupt the memory.
+    remembered.rowIndex = 99;
+    assert.equal(readRememberedLiveSelection().rowIndex, 3);
+    forgetLiveSelection();
+  });
+
+  test("an empty rail id is never remembered", () => {
+    forgetLiveSelection();
+    assert.equal(rememberLiveSelection({ railId: "", rowIndex: 2 }), null);
+    assert.equal(rememberLiveSelection(null), null);
+    assert.equal(readRememberedLiveSelection(), null);
+  });
+
+  test("round-trips through the namespaced storage key (cheap restart persistence)", () => {
+    assert.equal(LIVE_SELECTION_STORAGE_KEY, "nuvio.live.selection.v1");
+    forgetLiveSelection();
+    const storage = memoryStorage();
+    rememberLiveSelection({ railId: categoryRailId(43), rowIndex: 5 }, storage);
+    // Memory is authoritative within the session; a fresh session (memory
+    // gone) falls back to the namespaced storage.
+    forgetLiveSelection();
+    assert.deepEqual(readRememberedLiveSelection(storage), { railId: categoryRailId(43), rowIndex: 5 });
+    forgetLiveSelection();
+  });
+
+  test("corrupt storage payload reads as null, not a crash", () => {
+    forgetLiveSelection();
+    const storage = memoryStorage();
+    storage.setItem(LIVE_SELECTION_STORAGE_KEY, "{not json");
+    assert.equal(readRememberedLiveSelection(storage), null);
+  });
+
+  test("a storage that throws never breaks the caller", () => {
+    forgetLiveSelection();
+    const throwing = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); } };
+    assert.doesNotThrow(() => rememberLiveSelection({ railId: categoryRailId(42), rowIndex: 1 }, throwing));
+    assert.deepEqual(readRememberedLiveSelection(throwing), { railId: categoryRailId(42), rowIndex: 1 });
+    forgetLiveSelection();
+  });
+
+  describe("resolveLiveSelectionRestore rules", () => {
+    const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 1, recentCount: 2 });
+
+    test("existing rail id: restored at its index with the row clamped to the visible list", () => {
+      const expectedIndex = items.findIndex((item) => item.railId === categoryRailId(43));
+      assert.deepEqual(resolveLiveSelectionRestore(items, { railId: categoryRailId(43), rowIndex: 7 }, 4), {
+        railId: categoryRailId(43),
+        index: expectedIndex,
+        rowIndex: 3 // 7 clamps into a 4-row list
+      });
+    });
+
+    test("vanished category (source collapsed): falls back to that source's header", () => {
+      withCollapsedSources(["source:Magis"], () => {
+        const collapsedItems = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 1, recentCount: 2 });
+        assert.equal(collapsedItems.some((item) => item.railId === categoryRailId(42)), false);
+        assert.deepEqual(resolveLiveSelectionRestore(collapsedItems, { railId: categoryRailId(42), rowIndex: 2 }, 2), {
+          railId: "source:Magis",
+          index: collapsedItems.findIndex((item) => item.railId === "source:Magis"),
+          rowIndex: 0
+        });
+      });
+    });
+
+    test("vanished source: falls back to the first item", () => {
+      assert.deepEqual(resolveLiveSelectionRestore(items, { railId: "cat:vanished-source", rowIndex: 5 }, 3), {
+        railId: null,
+        index: 0,
+        rowIndex: 0
+      });
+    });
+
+    test("no memory at all: null, so mount keeps today's first-category default", () => {
+      assert.equal(resolveLiveSelectionRestore(items, null, 3), null);
+      assert.equal(resolveLiveSelectionRestore(items, undefined, 3), null);
+    });
+  });
+
+  test("tune-in remembers the selection and mount restores it (wiring contract)", () => {
+    const tuneSource = readFileSync(
+      new URL("../js/ui/screens/live/liveScreenMethods-03-tune-in.js", import.meta.url),
+      "utf8"
+    );
+    const mountSource = readFileSync(
+      new URL("../js/ui/screens/live/liveScreenMethods-01-mount-and-load.js", import.meta.url),
+      "utf8"
+    );
+    assert.match(tuneSource, /rememberLiveSelection\(/);
+    assert.match(mountSource, /readRememberedLiveSelection\(/);
+    assert.match(mountSource, /resolveLiveSelectionRestore\(/);
   });
 });
 

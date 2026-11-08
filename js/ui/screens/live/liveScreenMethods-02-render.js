@@ -329,6 +329,85 @@ export function toggleSourceCollapsed(collapsedIds, sourceRailId) {
   else set.add(id);
 }
 
+// Remembered Live TV selection -------------------------------------------
+// The last rail selection (stable railId) plus the focused channel row,
+// remembered at MODULE level (like the mobile app's LiveTvListMemory) so
+// leaving to the player — or unmounting entirely — never loses where the user
+// was. It is also written to one cheap namespaced key so it survives a full
+// app restart; the in-memory value is authoritative within a session.
+export const LIVE_SELECTION_STORAGE_KEY = "nuvio.live.selection.v1";
+
+let rememberedLiveSelection = null;
+
+// Saves { railId, rowIndex }; a missing railId is never remembered. Returns
+// the stored snapshot (or null). Storage is injectable for tests and all
+// access is guarded, like the favourites/recents stores.
+export function rememberLiveSelection(selection, storage) {
+  const railId = String(selection?.railId ?? "");
+  if (!railId) return null;
+  rememberedLiveSelection = {
+    railId,
+    rowIndex: Math.max(0, Math.trunc(Number(selection?.rowIndex) || 0))
+  };
+  const store = storage ?? globalThis?.localStorage ?? null;
+  try {
+    store?.setItem?.(LIVE_SELECTION_STORAGE_KEY, JSON.stringify(rememberedLiveSelection));
+  } catch (_) {
+    // Persistence is best effort; the in-memory value keeps working.
+  }
+  return { ...rememberedLiveSelection };
+}
+
+export function readRememberedLiveSelection(storage) {
+  if (rememberedLiveSelection) return { ...rememberedLiveSelection };
+  const store = storage ?? globalThis?.localStorage ?? null;
+  try {
+    const raw = store?.getItem?.(LIVE_SELECTION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const railId = String(parsed?.railId ?? "");
+    if (!railId) return null;
+    return { railId, rowIndex: Math.max(0, Math.trunc(Number(parsed?.rowIndex) || 0)) };
+  } catch (_) {
+    return null;
+  }
+}
+
+// Test/session isolation: clears the in-memory value (storage is untouched).
+export function forgetLiveSelection() {
+  rememberedLiveSelection = null;
+}
+
+// Pure restore rules over the CURRENT flat rail items:
+//   1. the remembered railId still exists -> restored at its index, with the
+//      row index clamped to the visible channel count,
+//   2. it is a category whose source section still exists -> that source's
+//      header (row 0),
+//   3. otherwise (source vanished) -> the first item (index 0, row 0).
+// With no memory at all it returns null so the caller keeps its own default.
+export function resolveLiveSelectionRestore(items, remembered, channelCount = 0) {
+  if (!remembered) return null;
+  const list = Array.isArray(items) ? items : [];
+  const railId = String(remembered.railId ?? "");
+  const rowIndex = Math.max(0, Math.trunc(Number(remembered.rowIndex) || 0));
+  if (railId) {
+    const index = list.findIndex((item) => item?.railId === railId);
+    if (index >= 0) {
+      return { railId, index, rowIndex: clampIndex(rowIndex, channelCount) };
+    }
+    if (railId.startsWith("cat:")) {
+      const owner = list.find(
+        (item) =>
+          item?.type === "source" && (Array.isArray(item.categories) ? item.categories : []).some((category) => category?.railId === railId)
+      );
+      if (owner) {
+        return { railId: owner.railId, index: list.indexOf(owner), rowIndex: 0 };
+      }
+    }
+  }
+  return { railId: null, index: 0, rowIndex: 0 };
+}
+
 // The flat focus order of the LEFT RAIL for the current state:
 //   [search] [favorites] [recents?] [all] [source header, its categories]...
 // Counts are read from the per-category caches ONLY (no extra portal calls):

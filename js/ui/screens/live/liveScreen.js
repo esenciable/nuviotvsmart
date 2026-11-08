@@ -58,7 +58,12 @@ export {
   readFavoriteIds,
   writeFavoriteIds,
   toggleFavoriteId,
-  clampIndex
+  clampIndex,
+  LIVE_SELECTION_STORAGE_KEY,
+  rememberLiveSelection,
+  readRememberedLiveSelection,
+  forgetLiveSelection,
+  resolveLiveSelectionRestore
 } from "./liveScreenMethods-02-render.js";
 
 function isBackEvent(event) {

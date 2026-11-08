@@ -50,7 +50,7 @@ function reportLiveErrorSafe(error, where) {
 //                          applies the query and moves to the results.
 // Back exits the keyboard first, then search itself, before leaving the screen.
 export function createLiveScreenMethods03() {
-  const { Router, ScreenUtils, liveRepository, isBackEvent, escapeHtml, t } = internals;
+  const { Router, ScreenUtils, liveRepository, isBackEvent, escapeHtml, t, rememberLiveSelection } = internals;
 
   return {
     onKeyDown(event) {
@@ -518,6 +518,10 @@ export function createLiveScreenMethods03() {
       } catch (error) {
         reportLiveErrorSafe(error, "pushRecentChannel");
       }
+      // Remember WHERE the user was: the selected rail id and the focused row
+      // go into the module-level memory before handing off to the player, so
+      // Back restores the exact rail group and channel row.
+      rememberLiveSelection({ railId: this.railSelection, rowIndex: this.rowIndex });
       Router.navigate("player", {
         streamUrl: url,
         itemType: "channel",

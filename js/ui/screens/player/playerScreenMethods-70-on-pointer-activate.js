@@ -198,7 +198,20 @@ export function createPlayerScreenMethods70() {
     exitPlayerOnBack() {
       const returnRoute = String(this.params?.returnRoute || "");
       if (returnRoute === "live") {
-        Router.navigate("live", {}, { isBackNavigation: true });
+        // The Player was PUSHED on top of the Live screen, so exiting must
+        // CONSUME this player entry. Pushing a fresh live route instead made
+        // history [live, player, live] — the next Back popped straight back
+        // into the player (the re-open loop). Prefer the router's own
+        // "return to an existing route" helper: it traverses browser history
+        // back to the live entry and the popstate restore consumes the
+        // player's entry with the same shape the router uses for history
+        // restores ({ fromHistory, skipStackPush, isBackNavigation }).
+        if (Router.popToExistingRoute?.("live")) {
+          return "history";
+        }
+        // Conservative fallback (no initialized history): replace the player's
+        // own entry in place — still no stack push and no new history entry.
+        Router.navigate("live", {}, { skipStackPush: true, replaceHistory: true, isBackNavigation: true });
         return true;
       }
       return this.navigateBackToStreamScreen();
