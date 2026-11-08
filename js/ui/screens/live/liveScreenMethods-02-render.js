@@ -1271,9 +1271,15 @@ export function createLiveScreenMethods02() {
     // Swaps a pooled row node's content for another channel: the article
     // node is REUSED, only its dataset and children change. This is the
     // recycling primitive — a scroll step never creates or destroys nodes
-    // once the pool is warm.
+    // once the pool is warm. The tabindex is stamped here because pooled
+    // nodes can also be freshly CREATED by the window sync mid-navigation
+    // (pool growth), where no ScreenUtils.indexFocusables pass runs: without
+    // the stamp the node is not focusable, focus() is a silent no-op and the
+    // native reveal never happens — the ring walks off-screen and the press
+    // is dead (the recycled row must render exactly like a fresh one).
     fillChannelRowNode(node, channel, index = 0) {
       node.className = "live-channel-row focusable";
+      node.tabIndex = 0;
       node.setAttribute("data-action", "tuneIn");
       node.setAttribute("data-row-index", String(Number(index) || 0));
       node.setAttribute("data-channel-id", String(channel?.id || ""));
