@@ -62,10 +62,15 @@ export function createLiveScreenMethods01() {
       this.rowIndex = 0;
       this.rowFocusTarget = "row"; // "row" | "star"
 
-      // Search state: a real <input> is mounted over the rail's search row
-      // while active; the left column dims but stays focusable.
+      // Search state: the deterministic on-screen keyboard (no system IME,
+      // no system IME, no input field). `searchActive` means a query is applied (rail dimmed,
+      // flat results on the right); `keyboardOpen` means the fixed keyboard
+      // panel is mounted and owns the D-pad. Back from the keyboard keeps the
+      // query; Back on the Buscar row afterwards exits search entirely.
       this.searchActive = false;
       this.searchQuery = "";
+      this.keyboardOpen = false;
+      this.keyboardIndex = 0;
 
       // Favourites and recently watched: persisted under namespaced keys.
       // Favourites store stable ids; recents store lightweight snapshots so

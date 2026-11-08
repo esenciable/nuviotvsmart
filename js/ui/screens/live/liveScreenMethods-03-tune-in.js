@@ -1,6 +1,16 @@
 /* eslint-disable no-unused-vars */
 import * as internals from "./liveScreen.js";
-import { clampIndex, shouldAcceptRepeatMove, collapsedSourceIdsRef, toggleSourceCollapsed } from "./liveScreenMethods-02-render.js";
+import {
+  clampIndex,
+  shouldAcceptRepeatMove,
+  collapsedSourceIdsRef,
+  toggleSourceCollapsed,
+  KEYBOARD_KEYS,
+  buildKeyboardLayout,
+  keyboardFlatKeys,
+  keyboardMove,
+  applyKeyboardKey
+} from "./liveScreenMethods-02-render.js";
 
 const NOTICE_VISIBLE_MS = 6000;
 
@@ -31,14 +41,19 @@ function reportLiveErrorSafe(error, where) {
 //   rail  (left column)  — UP/DOWN move inside the rail; RIGHT/Enter activate
 //                          the row (select + enter the channel rows; Enter on
 //                          a source header toggles it; Enter on the search row
-//                          opens search); UP from the very top reaches the
-//                          hero actions while the hero is visible.
+//                          opens the on-screen keyboard); UP from the very top
+//                          reaches the hero actions while the hero is visible.
 //   rows  (right side)   — UP/DOWN move one row (class toggles only); Enter
 //                          tunes in; RIGHT reaches the row's star; LEFT backs
 //                          out to the rail.
 //   hero  (top actions)  — LEFT/RIGHT between the search and guide pills;
 //                          DOWN returns to the rail.
-// Back exits search before leaving the screen.
+//   keyboard (search)    — the deterministic on-screen keyboard (no system
+//                          IME): arrows move between keys row-aware, Enter
+//                          types the focused key, Back closes the keyboard and
+//                          returns to the Buscar row keeping the query, Listo
+//                          applies the query and moves to the results.
+// Back exits the keyboard first, then search itself, before leaving the screen.
 export function createLiveScreenMethods03() {
   const { Router, ScreenUtils, liveRepository, isBackEvent, escapeHtml, t } = internals;
 
@@ -48,6 +63,12 @@ export function createLiveScreenMethods03() {
         const code = Number(event?.keyCode || 0);
         if (isBackEvent(event)) {
           event?.preventDefault?.();
+          if (this.keyboardOpen) {
+            // Back inside the keyboard closes it and keeps the query: focus
+            // returns to the Buscar row with the results still applied.
+            this.closeKeyboard();
+            return;
+          }
           if (this.searchActive) {
             this.exitSearch();
             return;
@@ -55,11 +76,15 @@ export function createLiveScreenMethods03() {
           Router.back();
           return;
         }
-        if (this.searchActive) {
-          // The real <input> owns every key while search is open; Escape (27)
-          // leaves search. Nothing may move focus out from under the IME.
-          if (code === 27) {
-            this.exitSearch();
+        if (this.focusZone === "keyboard") {
+          // The on-screen keyboard owns the D-pad while it is open. Movement
+          // is pure (row-aware over the cached key model) — no DOM measuring.
+          if (code === 37 || code === 39) {
+            this.moveKeyboard(code === 37 ? -1 : 1, 0);
+          } else if (code === 38 || code === 40) {
+            this.moveKeyboard(0, code === 38 ? -1 : 1);
+          } else if (code === 13) {
+            this.applyFocusedKey();
           }
           return;
         }
@@ -321,43 +346,72 @@ export function createLiveScreenMethods03() {
     },
 
     // Search -----------------------------------------------------------------
+    // The on-screen keyboard replaces the old system-IME-over-an-input approach:
+    // the IME never attached on the device and typed text was invisible. Now
+    // every key is a .focusable node we own, registered in the cached layout
+    // metrics, and the query renders as plain DOM text in the query line.
     openSearch() {
       this.searchActive = true;
-      this.searchQuery = "";
+      this.keyboardOpen = true;
+      this.keyboardIndex = 0;
+      this.focusZone = "keyboard";
       this.rowIndex = 0;
       this.rowFocusTarget = "row";
+      // Reopening with an existing query recomputes the results first; the
+      // full render then mounts the fixed keyboard panel with them in place.
       this.refreshVisibleChannels();
-      // Mounting the input and focusing it is what invites the TV system IME;
-      // typing filters immediately even if a TV never shows the IME.
-      const input = this.container?.querySelector(".live-search-input");
-      if (input) {
-        focusWithoutAutoScrollSafe(input);
-        this.bindSearchInput(input);
-      }
+      this.render({ preserveFocus: false });
     },
 
-    bindSearchInput(input) {
-      const field = input || this.container?.querySelector(".live-search-input");
-      if (!field || field.dataset.liveBound === "1") return;
-      field.dataset.liveBound = "1";
-      field.addEventListener("input", () => {
-        this.searchQuery = String(field.value || "");
+    // D-pad movement inside the keyboard: pure row-aware move over the fixed
+    // key model, then a class toggle (never a re-render, never a measurement).
+    moveKeyboard(dx, dy) {
+      const next = keyboardMove(KEYBOARD_KEYS, this.keyboardIndex || 0, dx, dy);
+      if (next === this.keyboardIndex) return;
+      this.keyboardIndex = next;
+      this.applyFocusState({ smooth: true });
+    },
+
+    // Enter on a key: chars/ESPACIO/BORRAR/LIMPIAR update the query purely,
+    // patch the query line in place and re-filter the rows; LISTO closes the
+    // keyboard and moves focus to the results.
+    applyFocusedKey() {
+      const entry = KEYBOARD_KEYS[this.keyboardIndex || 0];
+      if (!entry) return;
+      if (entry.key.type === "done") {
+        this.closeKeyboard({ toResults: true });
+        return;
+      }
+      const next = applyKeyboardKey(this.searchQuery, entry.key);
+      if (next === this.searchQuery) return;
+      this.searchQuery = next;
+      this.rowIndex = 0;
+      this.rowFocusTarget = "row";
+      this.updateKeyboardQueryLine?.();
+      this.refreshVisibleChannels();
+    },
+
+    // Back from the keyboard: close the panel and return focus to the Buscar
+    // row KEEPING the query (the results and the dimmed rail stay applied).
+    // With `toResults` (Listo), focus moves into the channel rows instead.
+    closeKeyboard({ toResults = false } = {}) {
+      this.keyboardOpen = false;
+      if (toResults) {
+        this.focusZone = "rows";
         this.rowIndex = 0;
         this.rowFocusTarget = "row";
-        this.refreshVisibleChannels();
-      });
-      field.addEventListener("keydown", (event) => {
-        // Escape never bubbles into a Back navigation while typing.
-        if (Number(event?.keyCode || 0) === 27 || event?.key === "Escape") {
-          event?.preventDefault?.();
-          event?.stopPropagation?.();
-          this.exitSearch();
-        }
-      });
+      } else {
+        this.focusZone = "rail";
+        const items = this.railItems();
+        const searchIndex = items.findIndex((item) => item.type === "search");
+        this.railIndex = clampIndex(searchIndex, items.length);
+      }
+      this.render({ preserveFocus: false });
     },
 
     exitSearch() {
       this.searchActive = false;
+      this.keyboardOpen = false;
       this.searchQuery = "";
       this.rowIndex = 0;
       this.rowFocusTarget = "row";
@@ -381,7 +435,7 @@ export function createLiveScreenMethods03() {
         const container = this.container;
         if (!container) return;
         const metrics = new Map();
-        for (const panel of container.querySelectorAll(".live-rail, .live-channel-list")) {
+        for (const panel of container.querySelectorAll(".live-rail, .live-channel-list, .live-keyboard-grid")) {
           const rows = new Map();
           for (const node of panel.querySelectorAll(".focusable")) {
             rows.set(node, { top: node.offsetTop, height: node.offsetHeight });
@@ -408,7 +462,7 @@ export function createLiveScreenMethods03() {
         if (!focused) {
           return;
         }
-        const panel = focused.closest(".live-rail, .live-channel-list");
+        const panel = focused.closest(".live-rail, .live-channel-list, .live-keyboard-grid");
         if (!panel) {
           return;
         }
@@ -625,16 +679,4 @@ function attributeEscape(value) {
   const raw = String(value ?? "");
   const escaped = globalThis.CSS?.escape ? CSS.escape(raw) : raw.replace(/(["\\])/g, "\\$1");
   return escaped;
-}
-
-function focusWithoutAutoScrollSafe(node) {
-  try {
-    internals.focusWithoutAutoScroll(node);
-  } catch (_) {
-    try {
-      node?.focus?.();
-    } catch (_) {
-      // Focus is best effort on constrained TV engines.
-    }
-  }
 }

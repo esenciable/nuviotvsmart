@@ -177,6 +177,117 @@ export function writeRecentChannels(recents, storage) {
   }
 }
 
+// On-screen keyboard -------------------------------------------------------
+// Deterministic replacement for the TV's system IME (which does not attach in
+// this widget): a fixed grid of keys we own. Pure helpers so node --test can
+// pin the layout, the movement and the query updates without a DOM.
+
+// The query never grows unbounded: typing past the cap is dropped.
+export const KEYBOARD_MAX_QUERY = 40;
+
+// Shown in the query line only while nothing has been typed.
+export const KEYBOARD_QUERY_PLACEHOLDER = "Escribe para buscar…";
+
+// The grid, row by row. Rows 0-2: A-Z plus Ñ (9 per row); row 3: the digits;
+// row 4: the four actions (ESPACIO / BORRAR / LIMPIAR / LISTO). Every key has
+// a stable id, a visible label, a type and the value typing contributes.
+export function buildKeyboardLayout() {
+  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZÑ".split("");
+  const rows = [];
+  for (let i = 0; i < letters.length; i += 9) {
+    rows.push(
+      letters.slice(i, i + 9).map((letter) => ({
+        id: `char:${letter}`,
+        label: letter,
+        type: "char",
+        value: letter
+      }))
+    );
+  }
+  rows.push(
+    "0123456789".split("").map((digit) => ({
+      id: `char:${digit}`,
+      label: digit,
+      type: "char",
+      value: digit
+    }))
+  );
+  rows.push([
+    { id: "action:space", label: "ESPACIO", type: "space", value: " " },
+    { id: "action:backspace", label: "BORRAR", type: "backspace", value: "" },
+    { id: "action:clear", label: "LIMPIAR", type: "clear", value: "" },
+    { id: "action:done", label: "LISTO", type: "done", value: "" }
+  ]);
+  return rows;
+}
+
+// The same grid flattened with each key's row/col coordinates — the exact
+// model the D-pad movement and the DOM (data-key-index) both use.
+export function keyboardFlatKeys(rows) {
+  const flat = [];
+  (Array.isArray(rows) ? rows : []).forEach((row, rowIndex) => {
+    (Array.isArray(row) ? row : []).forEach((key, col) => {
+      if (key) flat.push({ key, row: rowIndex, col });
+    });
+  });
+  return flat;
+}
+
+// The flat grid of the one keyboard this screen ships (deterministic: no DOM,
+// no data). Consumed by the focus model, the metrics cache and the renderer.
+export const KEYBOARD_KEYS = keyboardFlatKeys(buildKeyboardLayout());
+export const KEYBOARD_KEY_COUNT = KEYBOARD_KEYS.length;
+
+// Row-aware movement: horizontal steps clamp inside the key's own row;
+// vertical steps land in the target row at the nearest column (clamped when
+// that row is shorter). Always returns a valid flat index — never a dead end.
+export function keyboardMove(flatKeys, index, dx = 0, dy = 0) {
+  if (!Array.isArray(flatKeys) || flatKeys.length === 0) return 0;
+  const from = flatKeys[clampIndex(index, flatKeys.length)];
+  const stepX = Math.trunc(Number(dx) || 0);
+  const stepY = Math.trunc(Number(dy) || 0);
+  const rows = new Map();
+  for (const entry of flatKeys) {
+    const rowNumber = Number(entry?.row) || 0;
+    if (!rows.has(rowNumber)) rows.set(rowNumber, []);
+    rows.get(rowNumber).push(entry);
+  }
+  const rowNumbers = Array.from(rows.keys()).sort((a, b) => a - b);
+  const targetRowIndex = clampIndex(from.row + stepY, rowNumbers.length);
+  const rowEntries = rows.get(rowNumbers[targetRowIndex]) || [];
+  const col = clampIndex(from.col + stepX, rowEntries.length);
+  const target = rowEntries[col] || from;
+  return flatKeys.indexOf(target);
+}
+
+// Pure query update for one key press: chars and space append, BORRAR removes
+// exactly one character, LIMPIAR empties, LISTO is a no-op here (closing the
+// keyboard is the caller's job). The cap keeps typing from growing forever.
+export function applyKeyboardKey(query, key) {
+  const current = String(query ?? "");
+  const type = String(key?.type ?? "");
+  if (type === "backspace") return current.slice(0, -1);
+  if (type === "clear") return "";
+  if (type === "done") return current;
+  if (type === "char" || type === "space") {
+    return (current + String(key?.value ?? "")).slice(0, KEYBOARD_MAX_QUERY);
+  }
+  return current;
+}
+
+// The query line model: the caret is ALWAYS rendered after the typed text,
+// and the placeholder exists only while the query is empty — so typing is
+// visible as plain DOM text and never reflows the fixed-height line.
+export function queryLineView(query) {
+  const text = String(query ?? "");
+  return {
+    text,
+    placeholder: text ? "" : KEYBOARD_QUERY_PLACEHOLDER,
+    caretAfterText: true,
+    caretPosition: text.length
+  };
+}
+
 // Rail model ---------------------------------------------------------------
 
 // Stable rail ids for the fixed rows and per-item channel sources. Category
@@ -377,14 +488,34 @@ export function createLiveScreenMethods02() {
       .live-rail-row.focused { outline-color: #FFFFFF; background: #303030; }
       /* Selected-but-unfocused rail row: 1px ring at alpha 0.8. */
       .live-rail-row.is-selected { box-shadow: inset 0 0 0 1px rgba(245,245,245,0.8); }
-      .live-rail-search { position: relative; height: 45px; }
+      .live-rail-search { height: 45px; }
       .live-rail-icon { flex-shrink: 0; font-size: 21px; line-height: 24px; color: #B3B3B3; }
       .live-rail-label { flex: 1; min-width: 0; font-size: 21px; line-height: 24px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .live-rail-count { flex-shrink: 0; font-size: 18px; line-height: 22px; color: #808080; }
       .live-rail-row.focused .live-rail-count { color: #B3B3B3; }
-      /* The search input sits exactly over its rail row: a real <input> so the
-         TV system IME can attach to it, styled invisible as a chrome-less field. */
-      .live-search-input { position: absolute; inset: 0; width: 100%; height: 100%; background: transparent; border: 0; outline: none; color: #FFFFFF; font-size: 19.5px; padding: 0 15px 0 18px; box-sizing: border-box; }
+      /* The on-screen keyboard replaces the old IME-over-the-pill approach:
+         the TV's system IME never attached in this widget and typed text was
+         invisible. The panel is FIXED SIZE, the query line has a FIXED height
+         and every key has a FIXED size, so typing can never reflow anything. */
+      .live-keyboard { position: absolute; left: 84px; top: 300px; width: 560px; height: 350px; background: rgba(13,13,13,0.95); border: 1px solid rgba(255,255,255,0.12); border-radius: 24px; padding: 18px 24px; box-sizing: border-box; z-index: 3; display: flex; flex-direction: column; gap: 14px; }
+      /* Fixed-height query line: exactly what has been typed, plus a blinking
+         caret after the text, or the placeholder while empty. */
+      .live-keyboard-query { flex-shrink: 0; display: flex; align-items: center; height: 48px; padding: 0 4px; box-sizing: border-box; }
+      .live-keyboard-text { flex-shrink: 0; font-size: 21px; line-height: 24px; font-weight: 700; color: #FFFFFF; white-space: nowrap; overflow: hidden; max-width: 460px; }
+      .live-keyboard-caret { flex-shrink: 0; width: 3px; height: 28px; margin-left: 2px; background: #F5C400; animation: live-caret-blink 1.1s linear infinite; }
+      @keyframes live-caret-blink { 0%, 50% { opacity: 1; } 50.001%, 100% { opacity: 0; } }
+      .live-keyboard-placeholder { font-size: 19.5px; line-height: 24px; color: #808080; }
+      .live-keyboard-query.has-text .live-keyboard-placeholder { display: none; }
+      /* The key grid is the keyboard's scroll panel: shrinkable, and its keys
+         are registered in the cached layout metrics like every other panel. */
+      .live-keyboard-grid { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; position: relative; display: flex; flex-direction: column; gap: 8px; box-sizing: border-box; }
+      .live-keyboard-row { flex-shrink: 0; display: flex; gap: 8px; }
+      .live-key { flex-shrink: 0; display: flex; align-items: center; justify-content: center; height: 44px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 12px; outline: 2px solid transparent; outline-offset: -2px; font-size: 19.5px; line-height: 24px; font-weight: 700; color: #B3B3B3; box-sizing: border-box; cursor: pointer; transition: background-color 90ms ease; }
+      .live-key.focused { outline-color: #FFFFFF; background: #303030; color: #FFFFFF; }
+      .live-key.is-char { width: 48px; }
+      .live-key.is-digit { width: 44px; }
+      .live-key.is-space { width: 140px; font-size: 15px; }
+      .live-key.is-backspace, .live-key.is-clear, .live-key.is-done { width: 116px; font-size: 15px; }
       .live-source-header { height: 48px; }
       .live-source-chevron { flex-shrink: 0; width: 22px; font-size: 19.5px; line-height: 24px; color: #808080; transition: transform 120ms ease; }
       .live-rail-category { margin-left: 26px; height: 51px; }
@@ -454,6 +585,7 @@ export function createLiveScreenMethods02() {
               ${this.renderRail()}
               ${this.renderChannelList()}
             </div>
+            ${this.keyboardOpen ? this.renderKeyboard() : ""}
             ${this.notice ? `<div class="live-notice" role="status">${escapeHtml(this.notice)}</div>` : ""}
           </div>
         `;
@@ -462,7 +594,6 @@ export function createLiveScreenMethods02() {
         ScreenUtils.indexFocusables(this.container);
         // Real render: measure once NOW so the keypress path never has to.
         this.cacheLayoutMetrics?.();
-        this.bindSearchInput();
         const hasLogos = Boolean(this.container.querySelector(".live-row-logo img"));
         if (hasLogos) {
           this.logoProbeCount = (this.logoProbeCount || 0) + 1;
@@ -632,7 +763,6 @@ export function createLiveScreenMethods02() {
                      data-rail-index="${index}">
                   <span class="live-rail-icon" aria-hidden="true">⌕</span>
                   <span class="live-rail-label">${escapeHtml(item.label)}</span>
-                  ${this.searchActive ? `<input class="live-search-input" type="text" aria-label="${escapeHtml(t("live_search_open", {}, "Buscar canales"))}" value="${escapeHtml(this.searchQuery || "")}" />` : ""}
                 </div>
               `;
             }
@@ -715,11 +845,70 @@ export function createLiveScreenMethods02() {
       return Array.from(union.values());
     },
 
+    // ON-SCREEN KEYBOARD -----------------------------------------------------
+    // The deterministic search keyboard (no system IME, no input field): a
+    // fixed-size panel with the query line and the key grid. Keys are
+    // .focusable nodes with data-key-index, found by the same focus machinery
+    // as the rail and the channel rows.
+    renderKeyboard() {
+      try {
+        const view = queryLineView(this.searchQuery);
+        const rowsMarkup = buildKeyboardLayout()
+          .map((row, rowIndex) => {
+            const keysMarkup = row
+              .map((key) => {
+                const entry = KEYBOARD_KEYS.find((candidate) => candidate.key.id === key.id);
+                const index = entry ? KEYBOARD_KEYS.indexOf(entry) : 0;
+                return `<div class="live-key focusable is-${key.type === "char" ? (/[0-9]/.test(key.value) ? "digit" : "char") : key.type}"
+                             role="button"
+                             data-action="keyboardKey"
+                             data-key-index="${index}"
+                             data-key-type="${escapeHtml(key.type)}"
+                             data-key-value="${escapeHtml(key.value)}">${escapeHtml(key.label)}</div>`;
+              })
+              .join("");
+            return `<div class="live-keyboard-row" data-keyboard-row="${rowIndex}">${keysMarkup}</div>`;
+          })
+          .join("");
+        return `
+          <div class="live-keyboard" role="dialog" aria-label="${escapeHtml(t("live_search_open", {}, "Buscar canales"))}">
+            <div class="live-keyboard-query${view.text ? " has-text" : ""}"><span class="live-keyboard-text" data-keyboard-field="query-text">${escapeHtml(view.text)}</span><span class="live-keyboard-caret" aria-hidden="true"></span><span class="live-keyboard-placeholder" data-keyboard-field="query-placeholder">${escapeHtml(view.placeholder)}</span></div>
+            <div class="live-keyboard-grid">${rowsMarkup}</div>
+          </div>
+        `;
+      } catch (error) {
+        reportLiveErrorSafe(error, "renderKeyboard");
+        return "";
+      }
+    },
+
+    // Typing must be visible immediately WITHOUT a re-render: patch the query
+    // line in place (textContent + one class), exactly like the hero patch.
+    updateKeyboardQueryLine() {
+      try {
+        const line = this.container?.querySelector(".live-keyboard-query");
+        if (!line) return;
+        const view = queryLineView(this.searchQuery);
+        const textNode = line.querySelector('[data-keyboard-field="query-text"]');
+        if (textNode) textNode.textContent = view.text;
+        const placeholderNode = line.querySelector('[data-keyboard-field="query-placeholder"]');
+        if (placeholderNode) placeholderNode.textContent = view.placeholder;
+        line.classList.toggle("has-text", Boolean(view.text));
+      } catch (error) {
+        reportLiveErrorSafe(error, "updateKeyboardQueryLine");
+      }
+    },
+
     // Deterministic zone/index normalization: clamps every index to the real
     // item count and bounces impossible zones back to a reachable one so no
     // state can dead-end the D-pad (loading, empty category, error).
     normalizeFocusState() {
       const railLength = this.railItems().length;
+      if (this.focusZone === "keyboard") {
+        // The keyboard keys are a fixed set: the index always clamps into it.
+        this.keyboardIndex = clampIndex(Number.isInteger(this.keyboardIndex) ? this.keyboardIndex : 0, KEYBOARD_KEY_COUNT);
+        return;
+      }
       if (this.focusZone === "hero") {
         // The hero has a single control (search); one index, always 0.
         if (!this.heroChannel) {
@@ -782,8 +971,9 @@ export function createLiveScreenMethods02() {
     // list can never leave the D-pad pointing at nothing.
     focusedNode() {
       if (!this.container) return null;
-      if (this.searchActive) {
-        return this.container.querySelector(".live-search-input");
+      if (this.focusZone === "keyboard") {
+        const keys = this.container.querySelectorAll(".live-keyboard-grid .focusable");
+        return keys[this.keyboardIndex || 0] || keys[0] || null;
       }
       if (this.focusZone === "hero") {
         const pills = this.container.querySelectorAll(".live-hero-actions .live-pill");
@@ -929,7 +1119,6 @@ export function createLiveScreenMethods02() {
         // Real render (data arrival / search typing / favourite toggles):
         // re-measure once so the keypress path keeps using fresh cached offsets.
         this.cacheLayoutMetrics?.();
-        this.bindSearchInput();
         this.applyFocusState();
         this.updateHeroForFocus({ force: true });
       } catch (error) {

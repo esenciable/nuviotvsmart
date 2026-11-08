@@ -620,6 +620,83 @@ describe("static layout contract (no reflow on focus)", () => {
   });
 });
 
+describe("on-screen search keyboard (no system IME, no <input>)", () => {
+  const renderSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-02-render.js", import.meta.url),
+    "utf8"
+  );
+  const tuneSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-03-tune-in.js", import.meta.url),
+    "utf8"
+  );
+  const mountSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-01-mount-and-load.js", import.meta.url),
+    "utf8"
+  );
+
+  const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const styleStart = renderSource.indexOf('<style id="live-screen-style">');
+  const styleEnd = renderSource.indexOf("</style>", styleStart);
+  const style = renderSource.slice(styleStart, styleEnd);
+  const ruleBody = (selector) => {
+    const match = style.match(new RegExp(`${escapeRegex(selector)}\\s*\\{([^}]*)\\}`));
+    assert.ok(match, `CSS rule ${selector} exists`);
+    return match[1];
+  };
+
+  test("no <input> and no system-IME dependency remains in the live screen", () => {
+    assert.doesNotMatch(renderSource, /<input/i);
+    assert.doesNotMatch(renderSource, /live-search-input/);
+    assert.doesNotMatch(renderSource, /type="text"/);
+    assert.doesNotMatch(tuneSource, /bindSearchInput/);
+    assert.doesNotMatch(tuneSource, /addEventListener\(\s*["']input["']/);
+    assert.doesNotMatch(mountSource, /bindSearchInput/);
+  });
+
+  test("the keyboard is a fixed-size panel with a fixed-height query line and fixed keys", () => {
+    assert.match(renderSource, /live-keyboard\b/);
+    assert.match(renderSource, /live-keyboard-grid/);
+    assert.match(renderSource, /live-key\b/);
+    const panel = ruleBody(".live-keyboard");
+    assert.match(panel, /(?<!min-)width:\s*\d+px/);
+    assert.match(panel, /(?<!min-)height:\s*\d+px/);
+    const query = ruleBody(".live-keyboard-query");
+    assert.match(query, /(?<!min-)height:\s*\d+px/);
+    const key = ruleBody(".live-key");
+    assert.match(key, /(?<!min-)height:\s*\d+px/);
+    // Same focus convention as the rest of the screen: fill + inner ring.
+    assert.match(key, /outline:\s*2px solid transparent/);
+    assert.match(key, /outline-offset:\s*-2px/);
+  });
+
+  test("the blinking caret is an opacity animation, never a layout change", () => {
+    assert.match(style, /@keyframes\s+live-caret-blink/);
+    const caret = ruleBody(".live-keyboard-caret");
+    assert.match(caret, /animation:[^;]*live-caret-blink/);
+    assert.doesNotMatch(caret, /(?<!min-)width:\s*auto|width:\s*\d+%/);
+  });
+
+  test("keyboard keys use the shared .focusable machinery and the cached layout metrics", () => {
+    assert.match(renderSource, /live-keyboard-grid[^"]*"/);
+    assert.match(
+      tuneSource,
+      /querySelectorAll\("\.live-rail, \.live-channel-list, \.live-keyboard-grid"\)/,
+      "cacheLayoutMetrics registers the keyboard keys"
+    );
+    assert.match(
+      tuneSource,
+      /closest\("\.live-rail, \.live-channel-list, \.live-keyboard-grid"\)/,
+      "ensureFocusVisible resolves the keyboard panel"
+    );
+  });
+
+  test("the keyboard grid is a shrinkable scroll panel like rail and channel list", () => {
+    const grid = ruleBody(".live-keyboard-grid");
+    assert.match(grid, /overflow-y:\s*auto/);
+    assert.match(grid, /min-height:\s*0/);
+  });
+});
+
 describe("channelLogoInfo", () => {
   test("keeps the logo url and derives the letter fallback from the name", () => {
     const info = channelLogoInfo({ name: "Antena 3", logo: "http://example.test/a3.png" });
