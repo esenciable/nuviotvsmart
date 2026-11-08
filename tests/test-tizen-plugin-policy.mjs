@@ -77,9 +77,10 @@ test("a Tizen engine without WebAssembly is refused with its own reason", () => 
   assert.match(capabilities.reason, /WebAssembly/);
 });
 
-test("a package without the Tizen plugin service is still refused", () => {
+test("a package without the Tizen plugin service falls back to the direct browser transport", () => {
   const capabilities = snapshot({ pluginService: false });
-  assert.equal(capabilities.supportLevel, "unsupported");
-  assert.equal(capabilities.candidate, false);
-  assert.equal(capabilities.reason, "The packaged Tizen plugin service is missing");
+  assert.equal(capabilities.candidate, true);
+  assert.equal(capabilities.supportLevel, "limited");
+  assert.equal(capabilities.networkMode, "browser");
+  assert.match(capabilities.reason, /browser transport/);
 });

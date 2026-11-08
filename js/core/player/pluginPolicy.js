@@ -1,6 +1,11 @@
 import { Platform } from "../../platform/index.js";
 import { TizenCapabilities } from "../../platform/tizen/tizenCapabilities.js";
 
+// Shared with pluginServiceClient: the Tizen readiness fallback reuses the same
+// wording so the policy snapshot and the runtime health name one fallback.
+export const TIZEN_BROWSER_TRANSPORT_DETAIL =
+  "The packaged Tizen plugin service is missing; falling back to the direct browser transport";
+
 export const PLUGIN_QUOTAS = Object.freeze({
   modern: Object.freeze({
     // Keep the JS execution policy aligned with Android's PluginManager:
@@ -119,17 +124,26 @@ export function getPluginCapabilitySnapshot() {
     // numeric baseline only chooses the quota, so an unverified engine keeps the
     // bounded one.
     if (!pluginServicePackaged) {
+      // FORK PATCH: the packaged network service is optional. When the package
+      // ships without it (this The Frame reports web.service=false and both
+      // start methods fail), Tizen falls back to the same direct browser
+      // transport VIDAA uses (networkMode: "browser") instead of refusing
+      // plugins on the missing service alone. Worker and WebAssembly were
+      // already required above, so only their absence still refuses; the
+      // QuickJS worker self-test stays the authority on execution.
       return {
         ...snapshotFields(platform, PLUGIN_QUOTAS.limited, {
           appSupported,
           normalAddonsSupported: appSupported,
-          reason: "The packaged Tizen plugin service is missing"
+          candidate: true,
+          reason: TIZEN_BROWSER_TRANSPORT_DETAIL
         }),
         tizenVersion: capabilities.tizenVersion,
         chromiumMajorVersion: chrome,
         tizenPluginVersionSupported: capabilities.tizenPluginVersionSupported,
         precheckPassed: false,
-        pluginServicePackaged
+        pluginServicePackaged,
+        networkMode: "browser"
       };
     }
     const quota = capabilities.tizenPluginVersionSupported

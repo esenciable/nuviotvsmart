@@ -7,6 +7,7 @@ import {
   isExpectedPluginRedirectResponse
 } from "../core/player/pluginSecurity.js";
 import { cancelBrowserPluginRequest, fetchBrowserPluginRequest } from "./pluginBrowserTransport.js";
+import { TIZEN_BROWSER_TRANSPORT_DETAIL } from "../core/player/pluginPolicy.js";
 import {
   diagnosticError,
   emitPluginDiagnosticEvent,
@@ -53,6 +54,34 @@ function unsupportedTizenPluginResult() {
   };
 }
 
+function tizenBrowserTransportHealth() {
+  const workerSupport = typeof globalThis.Worker === "function";
+  const jsPluginCapability = workerSupport && typeof globalThis.WebAssembly === "object";
+  const networkSupport = typeof globalThis.fetch === "function";
+  return {
+    returnValue: jsPluginCapability && networkSupport,
+    status: "browser",
+    networkMode: "browser",
+    networkBoundary: false,
+    workerSupport,
+    jsPluginCapability,
+    detail: TIZEN_BROWSER_TRANSPORT_DETAIL
+  };
+}
+
+// A platform is on a browser-mode transport when it has no packaged service at
+// all (browser, VIDAA) or when readiness fell back to the direct transport
+// because the packaged service is unreachable. Guard for every code path that
+// must bypass 127.0.0.1 and use the existing browser transport instead.
+function usingBrowserTransport() {
+  if (!serviceForPlatform()) return true;
+  return (
+    cachedHealth?.returnValue === true &&
+    cachedHealth?.networkMode === "browser" &&
+    cachedHealth?.protocolVersion === undefined
+  );
+}
+
 function reportLifecycleFailure(error) {
   const detail = String(error?.message || error || "PluginService is unavailable");
   if (detail === lifecycleLastFailure) {
@@ -79,7 +108,10 @@ function assertCompatibleHealth(health) {
   // Direct requests remain subject to browser networking rules. Readiness in
   // this mode means the host APIs exist; PluginRuntime separately runs the
   // packaged QuickJS worker self-test before allowing provider execution.
-  if (!serviceForPlatform() && health.networkMode === "browser") {
+  // A packaged service that reports itself as a browser-mode transport without
+  // a protocol version is the same direct transport; a service health that
+  // still carries a protocol version must satisfy the full native contract.
+  if (health.networkMode === "browser" && health.protocolVersion === undefined) {
     if (health.workerSupport !== true || health.jsPluginCapability !== true)
       throw new Error(health.detail || "Plugin worker capabilities are unavailable");
     return health;
@@ -311,6 +343,19 @@ export const PluginServiceClient = {
         detail: String(error?.message || error)
       };
     }
+    // FORK PATCH: the packaged Tizen plugin service is optional and can be
+    // unreachable forever (web.service=false, both start methods fail). The
+    // attempt above is unchanged; when it fails and this runtime can fetch
+    // directly, readiness falls back to the browser transport instead of
+    // rejecting. Worker/WebAssembly absence keeps the honest refusal.
+    if (
+      Platform.isTizen() &&
+      cachedHealth.returnValue !== true &&
+      typeof globalThis.fetch === "function"
+    ) {
+      const fallback = tizenBrowserTransportHealth();
+      if (fallback.returnValue === true) cachedHealth = fallback;
+    }
     cachedHealthAt = Date.now();
     return cachedHealth;
   },
@@ -409,7 +454,7 @@ export const PluginServiceClient = {
       if (!areTizenPluginsSupported()) {
         throw new Error(TIZEN_PLUGIN_UNSUPPORTED_DETAIL);
       }
-      if (Platform.isBrowser() || Platform.isVidaa()) {
+      if (usingBrowserTransport()) {
         if (Platform.isBrowser() && globalThis.__NUVIO_ALLOW_BROWSER_PLUGIN_RUNTIME__ !== true)
           throw new Error("Plugin execution is TV-only");
         const result = await directBrowserFetch(request);
@@ -530,10 +575,9 @@ export const PluginServiceClient = {
 
   cancel(requestId) {
     if (!areTizenPluginsSupported()) return Promise.resolve(false);
-    const service = serviceForPlatform();
     if (!requestId) return Promise.resolve(false);
-    if (!service) return Promise.resolve(cancelBrowserPluginRequest(requestId));
-    return service.cancel({ requestId: String(requestId) });
+    if (usingBrowserTransport()) return Promise.resolve(cancelBrowserPluginRequest(requestId));
+    return serviceForPlatform().cancel({ requestId: String(requestId) });
   },
 
   clearCache() {
