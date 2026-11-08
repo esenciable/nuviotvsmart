@@ -17,9 +17,9 @@ import * as internals from "./liveScreen.js";
 // merge every category on demand.
 //
 // We have no EPG: the hero shows the source name where the reference shows the
-// time range, the muted line "Sin información de programa", and NO progress
-// bar. The 16:9 preview box keeps the channel logo centred — never a fake
-// thumbnail.
+// time range. It is a COMPACT TEXT BLOCK (number, name, source) — no image,
+// no preview box: the owner decision removed every channel logo from this
+// screen, so it never loads or decodes an image.
 //
 // Focus is deterministic state (focusZone + railIndex / rowIndex /
 // rowFocusTarget + heroIndex), never geometry. Movement must feel exactly
@@ -63,13 +63,7 @@ export function formatChannelRowLabel(channel) {
   };
 }
 
-// Logo resolution for thumbnails and the hero preview box: whitespace-only
-// urls count as missing so the letter fallback shows instead of a broken image.
-export function channelLogoInfo(channel) {
-  const logo = String(channel?.logo ?? "").trim();
-  const name = String(channel?.name ?? "").trim();
-  return { logo, letter: (name.charAt(0) || "?").toUpperCase() };
-}
+// Source display name from the channel's id/group; no logo is read here.
 
 // Case- and accent-insensitive normalization for the channel search filter.
 export function normalizeSearchText(value) {
@@ -126,8 +120,9 @@ export function toggleFavoriteId(ids, channelId) {
 
 // Recently watched ----------------------------------------------------------
 // The last tuned channels, persisted under one namespaced key as lightweight
-// snapshots (id + name + logo + number) so the rows render even before any
-// per-category cache is warm. Same storage idea as favourites.
+// snapshots (id + name + number) so the rows render even before any
+// per-category cache is warm. Same storage idea as favourites. The snapshot
+// is deliberately text-only: nothing on this screen loads an image.
 
 export const RECENTS_STORAGE_KEY = "nuvio.live.recents.v1";
 export const MAX_RECENT_CHANNELS = 12;
@@ -140,7 +135,6 @@ export function pushRecentChannel(recents, channel) {
   const snapshot = {
     id,
     name: String(channel?.name ?? "").trim() || "Canal en vivo",
-    logo: String(channel?.logo ?? "").trim(),
     number: channel?.number ?? null
   };
   const current = Array.isArray(recents) ? recents : [];
@@ -160,7 +154,6 @@ export function readRecentChannels(storage) {
       .map((entry) => ({
         id: String(entry.id),
         name: String(entry?.name ?? "").trim() || "Canal en vivo",
-        logo: String(entry?.logo ?? "").trim(),
         number: entry?.number ?? null
       }))
       .slice(0, MAX_RECENT_CHANNELS);
@@ -544,7 +537,7 @@ export function createLiveScreenMethods02() {
     <style id="live-screen-style">
       /* STATIC LAYOUT CONTRACT (measured from the Android TV reference, dp x1.5):
          every box has a fixed size. Nothing may resize on focus — a keypress
-         only toggles classes, writes hero text/src and lets the browser
+         only toggles classes, writes hero text and lets the browser
          reveal the focused row. The focus state is a fill plus an inner ring:
          no scale, no elevation, no layout change, and no transition on the
          focus state at all — the fill and the ring appear in the same frame. */
@@ -557,20 +550,15 @@ export function createLiveScreenMethods02() {
       /* Fixed 264px height (183px content + 21px padding on both sides); the
          hero is never content-sized, so showing/patching it can never resize
          the body below. Glass card: #0D0D0D at 0.86 + 1px white hairline. */
-      .live-hero { flex-shrink: 0; display: flex; align-items: stretch; gap: 20px; margin: 20px 36px 16px 84px; background: rgba(13,13,13,0.86); border: 1px solid rgba(255,255,255,0.12); border-radius: 30px; padding: 21px 27px; box-sizing: border-box; height: 264px; position: relative; overflow: hidden; }
+      .live-hero { flex-shrink: 0; display: flex; align-items: stretch; gap: 20px; margin: 20px 36px 16px 84px; background: rgba(13,13,13,0.86); border: 1px solid rgba(255,255,255,0.12); border-radius: 30px; padding: 21px 27px; box-sizing: border-box; height: 152px; position: relative; overflow: hidden; }
       .live-hero.is-hidden { display: none; }
-      .live-hero-main { display: flex; align-items: center; gap: 20px; flex: 1; min-width: 0; min-height: 0; }
-      .live-hero-logo { position: relative; width: 96px; height: 102px; border-radius: 15px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); overflow: hidden; flex-shrink: 0; }
-      .live-hero-logo-initial { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 42px; font-weight: 700; color: #808080; }
-      /* Late-loading logos are reserved a fixed box; the 64px image fills it
-         with object-fit: contain so decode time can never shift anything. */
-      .live-hero-logo img { position: absolute; top: 0; right: 0; bottom: 0; left: 0; margin: auto; width: 64px; height: 64px; object-fit: contain; }
-      .live-hero-logo img.is-broken, .live-hero-logo img.is-hidden { display: none; }
+      /* Compact text block: vertical centre in the fixed panel; the freed
+         height (Down from 264px with the logo + preview boxes) flows to the
+         channel list below. */
+      .live-hero-main { display: flex; align-items: center; flex: 1; min-width: 0; min-height: 0; }
       .live-hero-meta { flex: 1; min-width: 0; min-height: 0; }
-      /* Channel line: number + channel name, 19.5px muted. */
-      .live-hero-topline { display: flex; align-items: baseline; gap: 10px; }
+      /* Channel line: the number, 19.5px muted. */
       .live-hero-number { font-size: 19.5px; line-height: 24px; height: 24px; font-weight: 700; color: #808080; }
-      .live-hero-channel { font-size: 19.5px; line-height: 24px; height: 24px; color: #B3B3B3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       /* Title: the channel name, 42px ExtraBold, exactly one line. */
       .live-hero-name { font-size: 42px; font-weight: 800; line-height: 48px; height: 48px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .live-hero-source { font-size: 19.5px; line-height: 24px; height: 24px; color: #B3B3B3; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -578,12 +566,8 @@ export function createLiveScreenMethods02() {
       /* Gear/search control: 51x51, radius 15. */
       .live-pill { display: inline-flex; align-items: center; justify-content: center; width: 51px; height: 51px; background: rgba(13,13,13,0.66); border: 0; border-radius: 15px; color: #B3B3B3; font-size: 19.5px; outline: none; cursor: pointer; box-sizing: border-box; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); }
       .live-pill.focused { outline: 2px solid #FFFFFF; outline-offset: -2px; background: #303030; color: #FFFFFF; }
-      /* 16:9 preview box: fixed 325x183, radius 18; the logo sits centred. We
-         have no frame source, so no fake thumbnail is ever drawn. */
-      .live-hero-preview { flex-shrink: 0; width: 325px; height: 183px; border-radius: 18px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
-      .live-hero-preview img { width: 100%; height: 100%; object-fit: contain; }
-      .live-hero-preview img.is-broken, .live-hero-preview img.is-hidden { display: none; }
-      .live-hero-preview-initial { font-size: 64px; font-weight: 700; color: #55555c; }
+      /* 16:9 preview box REMOVED (it existed to show the channel image). The
+         freed height flows to the body below; no image css remains at all. */
       /* BODY: narrow LEFT RAIL + channel rows on the right ------------------- */
       /* Screen padding: 84px left, 36px right. */
       .live-body { flex: 1; min-height: 0; min-width: 0; display: flex; gap: 20px; padding: 0 36px 24px 84px; box-sizing: border-box; }
@@ -608,7 +592,7 @@ export function createLiveScreenMethods02() {
          the TV's system IME never attached in this widget and typed text was
          invisible. The panel is FIXED SIZE, the query line has a FIXED height
          and every key has a FIXED size, so typing can never reflow anything. */
-      .live-keyboard { position: absolute; left: 84px; top: 300px; width: 560px; height: 350px; background: rgba(13,13,13,0.95); border: 1px solid rgba(255,255,255,0.12); border-radius: 24px; padding: 18px 24px; box-sizing: border-box; z-index: 3; display: flex; flex-direction: column; gap: 14px; }
+      .live-keyboard { position: absolute; left: 84px; top: 224px; width: 560px; height: 350px; background: rgba(13,13,13,0.95); border: 1px solid rgba(255,255,255,0.12); border-radius: 24px; padding: 18px 24px; box-sizing: border-box; z-index: 3; display: flex; flex-direction: column; gap: 14px; }
       /* Fixed-height query line: exactly what has been typed, plus a blinking
          caret after the text, or the placeholder while empty. */
       .live-keyboard-query { flex-shrink: 0; display: flex; align-items: center; height: 48px; padding: 0 4px; box-sizing: border-box; }
@@ -634,14 +618,11 @@ export function createLiveScreenMethods02() {
       /* CHANNEL ROWS (right side) ------------------------------------------- */
       .live-channel-list { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; scroll-behavior: auto; position: relative; display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; }
       /* Fixed row pitch 57px: tile 51px + 6px gap. Inner padding 15px; the
-         62x39 logo box, the 2-line-clamped 21px name and the muted meta line
-         all live INSIDE the fixed tile — long text can never grow the row. */
+         2-line-clamped 21px name, the muted meta line and the star live
+         INSIDE the fixed tile — long text can never grow the row. No logo
+         box: the name gets the row's full width. */
       .live-channel-row { flex-shrink: 0; display: flex; align-items: center; gap: 14px; height: 51px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 18px; padding: 0 15px; outline: 2px solid transparent; outline-offset: -2px; cursor: pointer; box-sizing: border-box; overflow: hidden; }
       .live-channel-row.focused { outline-color: #FFFFFF; background: #303030; }
-      .live-row-logo { position: relative; width: 62px; height: 39px; border-radius: 12px; background: rgba(13,13,13,0.66); overflow: hidden; flex-shrink: 0; }
-      .live-row-logo-initial { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 21px; font-weight: 700; color: #808080; }
-      .live-row-logo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-      .live-row-logo img.is-broken { display: none; }
       .live-row-text { flex: 1; min-width: 0; min-height: 0; }
       /* Fixed line-height + a 2-line clamp: long channel names read fully
          enough without ever changing the row's fixed geometry. */
@@ -703,13 +684,6 @@ export function createLiveScreenMethods02() {
         this.container.innerHTML = shellMarkup;
 
         ScreenUtils.indexFocusables(this.container);
-        const hasLogos = Boolean(this.container.querySelector(".live-row-logo img"));
-        if (hasLogos) {
-          this.logoProbeCount = (this.logoProbeCount || 0) + 1;
-          if (this.logoProbeCount <= 2) {
-            this.probeChannelLogos?.();
-          }
-        }
         this.applyFocusState();
         this.updateHeroForFocus({ force: true });
       } catch (error) {
@@ -749,45 +723,30 @@ export function createLiveScreenMethods02() {
     },
 
     // HERO -------------------------------------------------------------------
-    // Hidden while nothing is selected; shows the focused/highlighted channel:
-    // logo box (96x102, 64px logo), the number + channel name line (19.5px), the
-    // name as 42px ExtraBold one-line title, the source line, the search
-    // control and the 325x183 preview box. No EPG exists, so there is no
-    // badge, no time range, no description and no "no program" line.
-    // Every patchable field (and both hero <img> nodes) is ALWAYS present, so
-    // a focus move can update the hero purely in place — see updateHeroForFocus.
+    // Hidden while nothing is selected; shows the focused/highlighted channel
+    // as a compact text block: number (19.5px), name as 42px ExtraBold
+    // one-line title, source line, plus the search control. No logo box, no
+    // 16:9 preview, no image of any kind.
+    // Every patchable field is ALWAYS present, so a focus move can update the
+    // hero purely in place — see updateHeroForFocus.
     renderHero() {
       try {
         const channel = this.heroChannel || null;
         const hidden = channel ? "" : " is-hidden";
         const label = formatChannelRowLabel(channel || {});
-        const logo = channelLogoInfo(channel || {});
         const source = channel ? sourceNameFromChannelId(channel?.id) || sourceNameFromColumnId(channel?.group) : "";
         const number = label.number ? label.number.replace(/\.$/, "") : "";
-        const heroImg = (field, withSrc) =>
-          `<img data-hero-field="${field}" class="${withSrc ? "" : "is-hidden"}" alt="" onerror="this.classList.add('is-broken')"${withSrc ? ` src="${escapeHtml(logo.logo)}"` : ""} />`;
         return `
           <section class="live-hero${hidden}" aria-hidden="${channel ? "false" : "true"}">
             <div class="live-hero-main">
-              <div class="live-hero-logo">
-                <span class="live-hero-logo-initial" data-hero-field="logo-letter" aria-hidden="true">${escapeHtml(logo.letter)}</span>
-                ${heroImg("logo-img", Boolean(logo.logo))}
-              </div>
               <div class="live-hero-meta">
-                <div class="live-hero-topline">
-                  <span class="live-hero-number" data-hero-field="number">${escapeHtml(number)}</span>
-                  <span class="live-hero-channel" data-hero-field="channel">${escapeHtml(label.name)}</span>
-                </div>
+                <div class="live-hero-number" data-hero-field="number">${escapeHtml(number)}</div>
                 <h1 class="live-hero-name" data-hero-field="name">${escapeHtml(label.name)}</h1>
                 <div class="live-hero-source" data-hero-field="source">${escapeHtml(source)}</div>
               </div>
             </div>
             <div class="live-hero-actions">
               <div class="live-pill focusable" data-action="openSearch" role="button" aria-label="${escapeHtml(t("live_search_open", {}, "Buscar canales"))}">⌕</div>
-            </div>
-            <div class="live-hero-preview" aria-hidden="true">
-              <span class="live-hero-preview-initial" data-hero-field="preview-letter" aria-hidden="true">${escapeHtml(logo.letter)}</span>
-              ${heroImg("preview-img", Boolean(logo.logo))}
             </div>
           </section>
         `;
@@ -799,8 +758,8 @@ export function createLiveScreenMethods02() {
 
     // Patch the hero fields in place for a newly focused/highlighted channel.
     // Never a re-render, never a re-measure, never a restructure: focus moves
-    // only write textContent, classes and an img src into nodes that already
-    // exist from the last real render.
+    // only write textContent into nodes that already exist from the last real
+    // render.
     updateHeroForFocus({ force = false } = {}) {
       try {
         const hero = this.container?.querySelector(".live-hero");
@@ -818,42 +777,16 @@ export function createLiveScreenMethods02() {
         }
         hero.dataset.heroChannelId = String(channel.id || "");
         const label = formatChannelRowLabel(channel);
-        const logo = channelLogoInfo(channel);
         const source = sourceNameFromChannelId(channel?.id) || sourceNameFromColumnId(channel?.group);
         const number = label.number ? label.number.replace(/\.$/, "") : "";
         const numberNode = hero.querySelector('[data-hero-field="number"]');
         if (numberNode) numberNode.textContent = number;
-        const channelNode = hero.querySelector('[data-hero-field="channel"]');
-        if (channelNode) channelNode.textContent = label.name;
         const nameNode = hero.querySelector('[data-hero-field="name"]');
         if (nameNode) nameNode.textContent = label.name;
         const sourceNode = hero.querySelector('[data-hero-field="source"]');
         if (sourceNode) sourceNode.textContent = source;
-        this.patchHeroImage(hero, '[data-hero-field="logo-letter"]', '[data-hero-field="logo-img"]', logo);
-        this.patchHeroImage(hero, '[data-hero-field="preview-letter"]', '[data-hero-field="preview-img"]', logo);
       } catch (error) {
         reportLiveErrorSafe(error, "updateHeroForFocus");
-      }
-    },
-
-    // One hero image box (logo or 16:9 preview): swap the src on the node that
-    // already exists and toggle visibility classes. The box itself is fixed
-    // size, so a late-loading logo can never shift anything.
-    patchHeroImage(hero, letterSelector, imgSelector, logo) {
-      const letterNode = hero.querySelector(letterSelector);
-      if (letterNode) letterNode.textContent = logo.letter;
-      const imgNode = hero.querySelector(imgSelector);
-      if (!imgNode) return;
-      if (logo.logo) {
-        if (imgNode.getAttribute("src") !== logo.logo) {
-          imgNode.classList.remove("is-broken");
-          imgNode.setAttribute("src", logo.logo);
-        }
-        imgNode.classList.remove("is-hidden");
-      } else {
-        imgNode.classList.remove("is-broken");
-        imgNode.removeAttribute("src");
-        imgNode.classList.add("is-hidden");
       }
     },
 
@@ -1156,7 +1089,8 @@ export function createLiveScreenMethods02() {
     },
 
     // The channel rows on the right: one per line, the existing row design
-    // (logo with letter fallback, `N. Nombre`, muted source, star). States
+    // (full-width 2-line-clamped name, `N. Nombre`, muted source, star).
+    // No logo box: nothing on this screen loads an image. States
     // (loading / empty / error / search hint) always keep the rail reachable.
     renderChannelList() {
       try {
@@ -1204,7 +1138,6 @@ export function createLiveScreenMethods02() {
 
     renderChannelRow(channel, index = 0) {
       const label = formatChannelRowLabel(channel);
-      const logo = channelLogoInfo(channel);
       const isFavorite = this.isFavoriteId(channel?.id);
       const source = sourceNameFromChannelId(channel?.id) || sourceNameFromColumnId(channel?.group);
       return `
@@ -1213,10 +1146,6 @@ export function createLiveScreenMethods02() {
                  data-row-index="${Number(index) || 0}"
                  data-channel-id="${escapeHtml(String(channel?.id || ""))}"
                  data-channel-title="${escapeHtml(channel?.name || t("live_channel_fallback_title", {}, "Live channel"))}">
-          <div class="live-row-logo">
-            <span class="live-row-logo-initial" aria-hidden="true">${escapeHtml(logo.letter)}</span>
-            ${logo.logo ? `<img src="${escapeHtml(logo.logo)}" alt="" onerror="this.classList.add('is-broken')" />` : ""}
-          </div>
           <div class="live-row-text">
             <div class="live-row-name">${escapeHtml(label.name)}</div>
             <div class="live-row-meta">${label.number ? `<span class="live-row-number">${escapeHtml(label.number)}</span>` : ""}${source ? `<span class="live-row-source">${escapeHtml(source)}</span>` : ""}</div>

@@ -42,7 +42,6 @@ export {
   sourceNameFromChannelId,
   sourceNameFromColumnId,
   formatChannelRowLabel,
-  channelLogoInfo,
   normalizeSearchText,
   channelMatchesQuery,
   buildKeyboardLayout,

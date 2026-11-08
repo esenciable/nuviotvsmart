@@ -418,58 +418,6 @@ export function createLiveScreenMethods03() {
     // No EPG source exists, so there is no guide control on the hero and no
     // guide screen to open.
 
-    // Temporary probe: a TV gives no logs, so each channel logo reports whether
-    // it actually decoded (naturalWidth) or errored. Decides between "the image
-    // never arrives" and "the image arrives but is not visible".
-    probeChannelLogos() {
-      const images = Array.from(this.container?.querySelectorAll(".live-row-logo img") || []).slice(0, 12);
-      if (!images.length) {
-        // The first renders are the loading skeleton: nothing to measure yet.
-        return;
-      }
-      const outcomes = [];
-      let pending = images.length;
-      const settle = (img, ok) => {
-        outcomes.push({ ok, w: img.naturalWidth || 0, src: String(img.currentSrc || img.src || "").slice(-28) });
-        pending -= 1;
-        if (pending > 0) return;
-        try {
-          void import("../../../core/diagnostics/runtimeBeacon.js")
-            .then((mod) =>
-              mod.sendRuntimeBeacon({
-                phase: "live-nav",
-                kind: "logos",
-                total: images.length,
-                ok: outcomes.filter((o) => o.ok).length,
-                sample: outcomes.slice(0, 3)
-              })
-            )
-            .catch(() => {});
-        } catch (_) {
-          // Diagnostics are optional.
-        }
-      };
-      images.forEach((img) => {
-        if (img.complete) {
-          settle(img, img.naturalWidth > 0);
-          return;
-        }
-        img.addEventListener("load", () => settle(img, img.naturalWidth > 0), { once: true });
-        img.addEventListener("error", () => settle(img, false), { once: true });
-      });
-      setTimeout(() => {
-        if (pending > 0) {
-          try {
-            void import("../../../core/diagnostics/runtimeBeacon.js")
-              .then((mod) => mod.sendRuntimeBeacon({ phase: "live-nav", stalled: pending }))
-              .catch(() => {});
-          } catch (_) {
-            // Diagnostics are optional.
-          }
-        }
-      }, 8000);
-    },
-
     async tuneIn(node) {
       const channelId = String(node?.dataset?.channelId || "");
       const playerTitle = String(node?.dataset?.channelTitle || t("live_channel_fallback_title", {}, "Live channel"));

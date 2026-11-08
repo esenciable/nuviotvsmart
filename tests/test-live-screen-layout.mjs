@@ -10,7 +10,6 @@ import {
   sourceNameFromChannelId,
   sourceNameFromColumnId,
   formatChannelRowLabel,
-  channelLogoInfo,
   normalizeSearchText,
   channelMatchesQuery,
   FAVORITES_STORAGE_KEY,
@@ -170,7 +169,7 @@ describe("recently watched (persisted last tuned channels)", () => {
     assert.equal(recents.length, 2);
   });
 
-  test("keeps a snapshot (id, name, logo, number) so rows render before caches warm", () => {
+  test("keeps a snapshot (id, name, number) so rows render before caches warm — no logo, nothing to decode", () => {
     const recents = pushRecentChannel([], {
       id: "magis:live:a",
       name: "Antena 3",
@@ -179,7 +178,7 @@ describe("recently watched (persisted last tuned channels)", () => {
       code: "a",
       group: "x"
     });
-    assert.deepEqual(recents[0], { id: "magis:live:a", name: "Antena 3", logo: "http://example.test/a.png", number: 7 });
+    assert.deepEqual(recents[0], { id: "magis:live:a", name: "Antena 3", number: 7 });
   });
 
   test("caps the list at MAX_RECENT_CHANNELS", () => {
@@ -202,8 +201,14 @@ describe("recently watched (persisted last tuned channels)", () => {
     const storage = memoryStorage();
     assert.equal(RECENTS_STORAGE_KEY.startsWith("nuvio."), true);
     assert.deepEqual(readRecentChannels(storage), []);
-    writeRecentChannels([{ id: "premiumtv:8f3a2b", name: "TCS", logo: "", number: null }], storage);
-    assert.deepEqual(readRecentChannels(storage), [{ id: "premiumtv:8f3a2b", name: "TCS", logo: "", number: null }]);
+    writeRecentChannels([{ id: "premiumtv:8f3a2b", name: "TCS", number: null }], storage);
+    assert.deepEqual(readRecentChannels(storage), [{ id: "premiumtv:8f3a2b", name: "TCS", number: null }]);
+  });
+
+  test("a legacy persisted snapshot that still carries a logo field reads back WITHOUT it", () => {
+    const storage = memoryStorage();
+    storage.setItem(RECENTS_STORAGE_KEY, JSON.stringify([{ id: "magis:live:a", name: "A", logo: "http://x/y.png", number: 1 }]));
+    assert.deepEqual(readRecentChannels(storage), [{ id: "magis:live:a", name: "A", number: 1 }]);
   });
 
   test("corrupt storage payload reads as empty, not a crash", () => {
@@ -367,14 +372,11 @@ describe("Android TV reference layout (source contract)", () => {
     "utf8"
   );
 
-  test("a hero panel on top: logo, channel line, title, source, search control, preview; no invented EPG", () => {
+  test("a hero panel on top: number, name, source, search control — a compact text block; no invented EPG", () => {
     assert.match(renderSource, /live-hero\b/);
-    assert.match(renderSource, /live-hero-logo/);
     assert.match(renderSource, /live-hero-number/);
-    assert.match(renderSource, /live-hero-channel/);
     assert.match(renderSource, /live-hero-name/);
     assert.match(renderSource, /live-hero-source/);
-    assert.match(renderSource, /live-hero-preview/);
     assert.match(renderSource, /data-action="openSearch"/);
     // No EPG: no badge (we cannot know when the programme is on air), no
     // programme info line, no progress bar, no fake times.
@@ -384,8 +386,25 @@ describe("Android TV reference layout (source contract)", () => {
     assert.doesNotMatch(renderSource, /live-hero-progress/);
   });
 
-  test("the hero preview keeps the channel logo centred instead of a fake thumbnail", () => {
-    assert.match(renderSource, /\.live-hero-preview img\s*\{[^}]*object-fit:\s*contain/);
+  test("the screen never creates, loads or decodes an image: no <img>, no background-image, no data URIs, no logo plumbing", () => {
+    const screenSource = readFileSync(
+      new URL("../js/ui/screens/live/liveScreen.js", import.meta.url),
+      "utf8"
+    );
+    const all = renderSource + tuneSource + mountSource + screenSource;
+    // No <img> node, no CSS or inline background-image, no data: URI payload,
+    // no lazy-image plumbing, no logo probe, no logo helper usage at all.
+    assert.doesNotMatch(all, /<img/i);
+    assert.doesNotMatch(all, /background-image/);
+    assert.doesNotMatch(all, /data:image/);
+    assert.doesNotMatch(all, /object-fit/);
+    assert.doesNotMatch(all, /loading=["']lazy|decoding=/);
+    assert.doesNotMatch(all, /channelLogoInfo/);
+    assert.doesNotMatch(all, /probeChannelLogos|logoProbeCount|hasLogos/);
+    assert.doesNotMatch(all, /live-row-logo|live-hero-logo|live-hero-preview/);
+    // The repository may still return `logo` fields; the screen simply never
+    // reads them (only the data layer and its own tests mention them).
+    assert.doesNotMatch(renderSource + tuneSource, /\.logo\b/);
   });
 
   test("a left vertical rail with search, fixed rows and per-source sections", () => {
@@ -422,8 +441,8 @@ describe("Android TV reference layout (source contract)", () => {
     assert.doesNotMatch(renderSource, /live-group-header/);
   });
 
-  test("channel rows keep the existing design: number, logo, name, source, star", () => {
-    assert.match(renderSource, /live-row-logo/);
+  test("channel rows keep the existing design: number, name, source, star — no logo box", () => {
+    assert.doesNotMatch(renderSource, /live-row-logo/);
     assert.match(renderSource, /live-row-number/);
     assert.match(renderSource, /live-row-name/);
     assert.match(renderSource, /live-row-source/);
@@ -526,13 +545,12 @@ describe("static layout contract (no reflow on focus)", () => {
     return match[1];
   };
 
-  test("fixed geometry: hero height, 16:9 preview, px rail width, fixed row and header heights", () => {
+  test("fixed geometry: compact hero text block, px rail width, fixed row and header heights", () => {
     const hero = ruleBody(".live-hero");
-    assert.match(hero, /(?<!min-)height:\s*\d+px/);
+    // The hero is a compact text block now: a smaller fixed height than the
+    // old 264px logo+preview panel, still static (never content-sized).
+    assert.match(hero, /(?<!min-)height:\s*152px/);
     assert.doesNotMatch(hero, /min-height/);
-    const preview = ruleBody(".live-hero-preview");
-    assert.match(preview, /(?<!min-)width:\s*\d+px/);
-    assert.match(preview, /(?<!min-)height:\s*\d+px/);
     const rail = ruleBody(".live-rail");
     assert.match(rail, /flex:\s*0\s+0\s+\d+px/);
     assert.doesNotMatch(rail, /\d+%/);
@@ -575,9 +593,9 @@ describe("static layout contract (no reflow on focus)", () => {
     }
   });
 
-  test("the hero is patched in place: focus moves only write textContent into existing nodes", () => {
+  test("updateHeroForFocus is patch-only and knows no image node", () => {
     const start = renderSource.indexOf("updateHeroForFocus({ force = false }");
-    const end = renderSource.indexOf("patchHeroImage(", start);
+    const end = renderSource.indexOf("// LEFT RAIL", start);
     assert.ok(start >= 0 && end > start, "updateHeroForFocus exists before patchHeroImage");
     const heroPath = renderSource.slice(start, end);
     assert.match(heroPath, /textContent/);
@@ -616,16 +634,9 @@ describe("static layout contract (no reflow on focus)", () => {
     assert.match(list, /overflow-y:\s*auto/);
   });
 
-  test("late-loading logos cannot shift layout: reserved fixed boxes with object-fit contain", () => {
-    const rowLogo = ruleBody(".live-row-logo");
-    assert.match(rowLogo, /(?<!min-)width:\s*\d+px/);
-    assert.match(rowLogo, /(?<!min-)height:\s*\d+px/);
-    assert.match(style, /\.live-row-logo img\s*\{[^}]*object-fit:\s*contain/);
-    const heroLogo = ruleBody(".live-hero-logo");
-    assert.match(heroLogo, /(?<!min-)width:\s*\d+px/);
-    assert.match(heroLogo, /(?<!min-)height:\s*\d+px/);
-    assert.match(style, /\.live-hero-logo img\s*\{[^}]*object-fit:\s*contain/);
-    assert.match(style, /\.live-hero-preview img\s*\{[^}]*object-fit:\s*contain/);
+  test("no image css remains: no logo boxes, no object-fit, no img selectors", () => {
+    assert.doesNotMatch(style, /live-row-logo|live-hero-logo|live-hero-preview/);
+    assert.doesNotMatch(style, /\bimg\b|object-fit/);
   });
 });
 
@@ -694,26 +705,6 @@ describe("on-screen search keyboard (no system IME, no <input>)", () => {
     const grid = ruleBody(".live-keyboard-grid");
     assert.match(grid, /overflow-y:\s*auto/);
     assert.match(grid, /min-height:\s*0/);
-  });
-});
-
-describe("channelLogoInfo", () => {
-  test("keeps the logo url and derives the letter fallback from the name", () => {
-    const info = channelLogoInfo({ name: "Antena 3", logo: "http://example.test/a3.png" });
-    assert.equal(info.logo, "http://example.test/a3.png");
-    assert.equal(info.letter, "A");
-  });
-
-  test("missing logo falls back to the letter", () => {
-    const info = channelLogoInfo({ name: "Antena 3", logo: "" });
-    assert.equal(info.logo, "");
-    assert.equal(info.letter, "A");
-  });
-
-  test("whitespace-only logo counts as missing and empty names get a question mark", () => {
-    const info = channelLogoInfo({ name: "", logo: "   " });
-    assert.equal(info.logo, "");
-    assert.equal(info.letter, "?");
   });
 });
 
