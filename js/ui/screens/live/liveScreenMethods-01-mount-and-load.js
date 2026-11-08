@@ -210,6 +210,17 @@ export function createLiveScreenMethods01() {
       return selection === internals.RAIL_FAVORITES_ID;
     },
 
+    // True when the visible list is one CATEGORY's deduplicated list: every
+    // background cache arrival can refine ownership (rows may leave once),
+    // so the visible rows must be recomputed — from the caches only, never
+    // an extra portal call. Search/favourites keep the FULL set and are
+    // covered by listDependsOnAllCaches above.
+    categorySelectionDependsOnCaches() {
+      if (this.searchActive) return false;
+      const selection = String(this.railSelection ?? "");
+      return selection.startsWith("cat:");
+    },
+
     // Recomputes this.channels from the current rail selection / search state
     // without touching the network. Used for rail switches, search updates,
     // favourite changes and cache warm-ups.
@@ -242,7 +253,11 @@ export function createLiveScreenMethods01() {
         } else if (selection && selection.startsWith("cat:")) {
           const columnId = selection.slice(4);
           const cached = caches.get(columnId);
-          this.channels = Array.isArray(cached) ? cached : [];
+          // Category dedupe (owner-approved rule): the list excludes channels
+          // another category owns; the generic catalogue keeps only the
+          // channels no specific category owns. Ownership comes from the same
+          // per-category caches — never an extra portal call.
+          this.channels = internals.filterChannelsByOwnership(Array.isArray(cached) ? cached : [], columnId, this.categoryOwnership());
           this.channelsError = "";
         }
       }
@@ -314,7 +329,9 @@ export function createLiveScreenMethods01() {
         }
         if (result.status === "success" && !this.channelsByColumn.has(String(columnId))) {
           this.channelsByColumn.set(String(columnId), result.data);
-          if (this.listDependsOnAllCaches()) {
+          if (this.listDependsOnAllCaches() || this.categorySelectionDependsOnCaches()) {
+            // A category selection refines quietly (a channel may leave its
+            // old category once); search/favourites grow with the caches.
             this.refreshVisibleChannels();
           } else {
             // Only the rail counts changed ("…" -> numbers).

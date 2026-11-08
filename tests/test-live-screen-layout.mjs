@@ -490,6 +490,19 @@ describe("Android TV reference layout (source contract)", () => {
   test("the mount module keeps the background preload that feeds per-category counts", () => {
     assert.match(mountSource, /preloadRemainingCategories/);
   });
+
+  test("the category list renderer applies dedupe, and the background preload refines the visible list without extra portal calls", () => {
+    // The category branch of refreshVisibleChannels must filter through the
+    // ownership map; search/favourites keep the full set (pinned in
+    // tests/test-live-category-dedupe.mjs).
+    const start = mountSource.indexOf("refreshVisibleChannels()");
+    const end = mountSource.indexOf("selectRailItem(", start);
+    const body = mountSource.slice(start, end);
+    assert.match(body, /filterChannelsByOwnership/);
+    // The preload hands its cache to the same recompute (no separate portal
+    // call path for ownership) instead of only refreshing search/favourites.
+    assert.match(mountSource, /categorySelectionDependsOnCaches/);
+  });
 });
 
 describe("player Back exits playback without pushing a route (no re-open loop)", () => {

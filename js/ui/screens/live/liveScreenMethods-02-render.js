@@ -283,6 +283,74 @@ export function queryLineView(query) {
   };
 }
 
+// Category dedupe ----------------------------------------------------------
+// The Magis portal exposes one GENERIC catalogue category ("ChannelList"):
+// that is the portal's full channel LISTING page, not a genre. Every other
+// category is SPECIFIC (Deportes, Vivo gratis, Cine y Series, a country...).
+// The categories overlap heavily (each specific category is 48-65% inside the
+// catalogue), so pressing through the rail used to show the same channel more
+// than once.
+//
+// Owner-approved rule: each channel lives in exactly ONE category. A SPECIFIC
+// category beats the generic catalogue, and among specific categories the
+// FIRST one in catalog order that contains the channel owns it; the generic
+// catalogue then shows ONLY the channels no specific category owns, so the
+// union of all categories equals the full channel set with no duplicates.
+// Ownership is derived ONLY from the per-category caches the background
+// preload already fills (never an extra portal call): an uncached category
+// contributes nothing, so lists show as-is and refine as ownership arrives.
+export const GENERIC_CATEGORY_NAME = "ChannelList";
+
+// Case-insensitive identification of the catalogue page category.
+export function isGenericCategoryName(name) {
+  return (
+    String(name ?? "")
+      .trim()
+      .toLowerCase() === GENERIC_CATEGORY_NAME.toLowerCase()
+  );
+}
+
+// Pure: a Map of channelId -> owning category columnId, walking the categories
+// in catalog order and reading ONLY the cached per-category lists. A specific
+// category overwrites a generic-only claim and wins over every LATER specific
+// one; the catalogue keeps only channels no specific category claims.
+export function computeCategoryOwnership({ categories = [], channelsByColumn = new Map() } = {}) {
+  const caches = channelsByColumn instanceof Map ? channelsByColumn : new Map();
+  const owners = new Map();
+  const specificOwned = new Set();
+  for (const category of Array.isArray(categories) ? categories : []) {
+    const columnId = String(category?.columnId ?? "").trim();
+    if (!columnId) continue;
+    const list = caches.get(columnId);
+    if (!Array.isArray(list)) continue; // not walked yet: contributes nothing
+    const generic = isGenericCategoryName(category?.name);
+    for (const channel of list) {
+      const id = String(channel?.id ?? "").trim();
+      if (!id) continue;
+      if (generic) {
+        if (!owners.has(id)) owners.set(id, columnId);
+      } else if (!specificOwned.has(id)) {
+        // Specific beats the generic catalogue and beats a later specific one.
+        owners.set(id, columnId);
+        specificOwned.add(id);
+      }
+    }
+  }
+  return owners;
+}
+
+// Pure: the category's visible list — its channels minus the ones another
+// category owns. A channel with no owner entry (only possible while the map
+// is still refining) stays, so lists never lose rows they must not lose.
+export function filterChannelsByOwnership(channels, columnId, ownership) {
+  const owners = ownership instanceof Map ? ownership : new Map();
+  const id = String(columnId ?? "");
+  return (Array.isArray(channels) ? channels : []).filter((channel) => {
+    const owner = owners.get(String(channel?.id ?? "").trim());
+    return owner == null || owner === id;
+  });
+}
+
 // Rail model ---------------------------------------------------------------
 
 // Stable rail ids for the fixed rows and per-item channel sources. Category
@@ -416,8 +484,19 @@ export function resolveLiveSelectionRestore(items, remembered, channelCount = 0)
 // a category with no cached list yet is `loading: true` with count `null`,
 // and its source's count stays `null` ("…") until every one of its
 // categories is cached.
-export function buildRailItems({ categories = [], channelsByColumn = new Map(), favoriteCount = 0, recentCount = 0 } = {}) {
+export function buildRailItems({
+  categories = [],
+  channelsByColumn = new Map(),
+  channelOwnership = null,
+  favoriteCount = 0,
+  recentCount = 0
+} = {}) {
   const caches = channelsByColumn instanceof Map ? channelsByColumn : new Map();
+  // Per-category counts reflect the DEDUPLICATED lists (the owner-approved
+  // rule): a cached category counts the channels it owns, the catalogue counts
+  // only its leftovers. An uncached category stays `…` (count null). The map
+  // is derived from the caches the preload already fills — no extra calls.
+  const ownership = channelOwnership instanceof Map ? channelOwnership : computeCategoryOwnership({ categories, channelsByColumn: caches });
   const items = [
     { type: "search", railId: RAIL_SEARCH_ID, label: "Buscar", count: null },
     { type: "favorites", railId: RAIL_FAVORITES_ID, label: "Favoritos", count: Math.max(0, Number(favoriteCount) || 0) }
@@ -450,7 +529,7 @@ export function buildRailItems({ categories = [], channelsByColumn = new Map(), 
       railId: categoryRailId(columnId),
       columnId,
       label: String(category?.name ?? "").trim() || "Sin nombre",
-      count: cached ? channels.length : null,
+      count: cached ? filterChannelsByOwnership(channels, columnId, ownership).length : null,
       loading: !cached
     });
   }
@@ -963,11 +1042,27 @@ export function createLiveScreenMethods02() {
       return buildRailItems({
         categories: this.categories,
         channelsByColumn: this.channelsByColumn,
+        channelOwnership: this.categoryOwnership(),
         favoriteCount: this.favoriteSet?.size
           ? this.unionCachedChannels().filter((channel) => this.favoriteSet.has(String(channel?.id))).length
           : 0,
         recentCount: Array.isArray(this.recentChannels) ? this.recentChannels.length : 0
       });
+    },
+
+    // Memoized ownership map (pure computeCategoryOwnership over the current
+    // per-category caches). Caches are only ever ADDED (never replaced), so
+    // the cache-key signature is a valid invalidation key: the map is
+    // recomputed exactly when a new category cache arrives from the preload,
+    // keeping railItems() (called on every focus normalization) cheap.
+    categoryOwnership() {
+      const caches = this.channelsByColumn instanceof Map ? this.channelsByColumn : new Map();
+      const signature = Array.from(caches.keys()).join("\u0000");
+      if (this._ownershipSignature !== signature || !(this._categoryOwnership instanceof Map)) {
+        this._categoryOwnership = computeCategoryOwnership({ categories: this.categories, channelsByColumn: caches });
+        this._ownershipSignature = signature;
+      }
+      return this._categoryOwnership;
     },
 
     // Writes a rail focus index and remembers WHICH item (by railId) the index
