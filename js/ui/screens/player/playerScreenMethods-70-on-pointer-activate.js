@@ -192,26 +192,31 @@ export function createPlayerScreenMethods70() {
         this.pauseOverlayTimer
       );
     },
-    // A channel is tuned in from Live TV, which is not a "stream" screen, so the
-    // default exit (navigateBackToStreamScreen) fell through to Home. Honour the
-    // route that opened the player when it declared one.
+    // A declared returnRoute is honoured when it names a route this app knows:
+    // Live TV and the lightweight Sports screen both PUSH the player on top,
+    // so a player that fails mid-playback (or Back while still loading) must
+    // land back on that route — never on Home or a dead black screen.
     exitPlayerOnBack() {
       const returnRoute = String(this.params?.returnRoute || "");
-      if (returnRoute === "live") {
-        // The Player was PUSHED on top of the Live screen, so exiting must
-        // CONSUME this player entry. Pushing a fresh live route instead made
-        // history [live, player, live] — the next Back popped straight back
-        // into the player (the re-open loop). Prefer the router's own
-        // "return to an existing route" helper: it traverses browser history
-        // back to the live entry and the popstate restore consumes the
-        // player's entry with the same shape the router uses for history
-        // restores ({ fromHistory, skipStackPush, isBackNavigation }).
-        if (Router.popToExistingRoute?.("live")) {
+      const knownReturnRoutes = new Set(["live", "sports"]);
+      if (knownReturnRoutes.has(returnRoute)) {
+        // The Player was PUSHED on top of the opening screen, so exiting must
+        // CONSUME this player entry. Pushing a fresh route instead made history
+        // [route, player, route] — the next Back popped straight back into the
+        // player (the re-open loop). Prefer the router's own "return to an
+        // existing route" helper: it traverses browser history back to the
+        // opening entry and the popstate restore consumes the player's entry
+        // with the same shape the router uses for history restores
+        // ({ fromHistory, skipStackPush, isBackNavigation }).
+        // The literal live call is pinned by the Live TV layout contract; the
+        // sports route uses the same helper with the declared route.
+        const poppedToExisting = returnRoute === "live" ? Router.popToExistingRoute?.("live") : Router.popToExistingRoute?.(returnRoute);
+        if (poppedToExisting) {
           return "history";
         }
         // Conservative fallback (no initialized history): replace the player's
         // own entry in place — still no stack push and no new history entry.
-        Router.navigate("live", {}, { skipStackPush: true, replaceHistory: true, isBackNavigation: true });
+        Router.navigate(returnRoute, {}, { skipStackPush: true, replaceHistory: true, isBackNavigation: true });
         return true;
       }
       return this.navigateBackToStreamScreen();

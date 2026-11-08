@@ -40,6 +40,15 @@ export const SPORTS_LOAD_ERROR_TEXT = "No se pudieron cargar los partidos";
 export const SPORTS_NO_SIGNAL_TEXT = "No hay señal para este partido";
 export const SPORTS_RESOLVING_TEXT = "Buscando señal…";
 
+// Probe failure (the addon answered but NO stream URL actually serves the
+// playlist): the honest copy carries the count of streams tried. The row keeps
+// its focus, so Enter retries the whole resolve+probe.
+export function probeFailedNoticeText(triedCount) {
+  const count = Math.floor(Number(triedCount) || 0);
+  if (count <= 0) return "La señal del addon no responde";
+  return `La señal del addon no responde (${count} ${count === 1 ? "señal probada" : "señales probadas"})`;
+}
+
 // Inline pending notice: the addon's retryAfterMs rounded to seconds. A
 // missing/zero retry hint falls back to the generic one-liner.
 export function pendingNoticeText(retryAfterMs) {

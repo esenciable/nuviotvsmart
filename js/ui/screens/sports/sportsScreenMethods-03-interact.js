@@ -1,5 +1,11 @@
 /* eslint-disable no-unused-vars */
 import * as internals from "./sportsScreen.js";
+// The probe lives next to the feed (its fetch follows the same "arms only in a
+// real browser/TV context" rule) and the probe-failure copy in the render
+// module; both are imported directly because sportsScreen.js re-exports only
+// the helpers the original layout contract pinned.
+import { pickPlayableStream } from "../../../core/sports/sportsFeed.js";
+import { probeFailedNoticeText } from "./sportsScreenMethods-02-render.js";
 
 // Key handling, activation and stream resolution for the Sports screen.
 // Focus zones:
@@ -159,22 +165,37 @@ export function createSportsScreenMethods03() {
         this.showNotice(`${internals.SPORTS_NO_SIGNAL_TEXT}: ${String(result.detail || "")}`);
         return;
       }
-      const stream = (Array.isArray(result.streams) ? result.streams : []).find(
+      const candidates = (Array.isArray(result.streams) ? result.streams : []).filter(
         (candidate) => candidate && String(candidate.url || "").trim()
       );
-      if (!stream) {
+      if (!candidates.length) {
         this.showNotice(internals.SPORTS_NO_SIGNAL_TEXT);
+        return;
+      }
+      // PROBE BEFORE HAND-OFF: the addon's URLs are unverified and were
+      // measured 404 — handing one to the player is the black screen the owner
+      // reported. Each candidate gets one bounded request; the first that
+      // answers is the one the player gets. If none answers: no navigation,
+      // honest notice with the count tried, row stays focused for a retry.
+      this.showNotice(internals.SPORTS_RESOLVING_TEXT, { sticky: true });
+      const probe = await pickPlayableStream(candidates);
+      this.clearNotice();
+      if (Router.getCurrent() !== "sports") {
+        return; // the screen was left while probing
+      }
+      if (!probe.url) {
+        this.showNotice(probeFailedNoticeText(probe.tried));
         return;
       }
       // Live HLS: the player's existing live engine ladder handles the stream.
       Router.navigate("player", {
-        streamUrl: stream.url,
+        streamUrl: probe.url,
         itemType: "channel",
         playerTitle: internals.matchRowTitle(event),
         returnRoute: "sports",
         streamCandidates: [
           {
-            url: stream.url,
+            url: probe.url,
             behaviorHints: {
               proxyHeaders: { request: {} }
             }

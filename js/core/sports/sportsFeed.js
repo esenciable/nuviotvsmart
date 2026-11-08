@@ -214,6 +214,85 @@ export function formatKickoffTime(kickoffMs) {
   return `${hh}:${mm}`;
 }
 
+// Probe before hand-off (owner rule: never open a dead player) ---------------
+// The addon's stream URLs arrive `verified: false` and were measured 404 even
+// with a browser User-Agent. Before the player handoff every candidate URL
+// gets ONE bounded request (≤6 s):
+//   - a playlist URL (m3u8/m3u) must answer 2xx with a body starting #EXTM3U;
+//   - any non-playlist URL only needs a 2xx.
+// Streams are tried in order; the first that answers wins; if none answers the
+// caller must NOT navigate. One attempt per stream, no retries, and the probe
+// only ever runs from an explicit Enter on a match.
+export const SPORTS_PROBE_TIMEOUT_MS = 6000;
+
+// A URL that claims to be an HLS/media playlist must prove it with #EXTM3U.
+export function looksLikePlaylistUrl(url) {
+  return /\.m3u8?\b/i.test(String(url || ""));
+}
+
+// The ordered candidate URLs from a resolveStreams result (garbage dropped).
+function probeCandidates(streams) {
+  return (Array.isArray(streams) ? streams : [])
+    .map((stream) => (stream && String(stream.url ?? "").trim() ? String(stream.url).trim() : ""))
+    .filter(Boolean);
+}
+
+async function probeUrlOnce(fetchFn, url, timeoutMs) {
+  let timer = null;
+  try {
+    const verdict = (async () => {
+      const response = await fetchFn(url, {});
+      // response.ok is exactly the 2xx acceptance rule.
+      if (!response?.ok) return false;
+      if (!looksLikePlaylistUrl(url)) return true;
+      const body = await response.text();
+      return String(body ?? "")
+        .trimStart()
+        .startsWith("#EXTM3U");
+    })();
+    // The whole verdict (fetch AND playlist body read) races the timer, so a
+    // hanging response can never exceed the bound.
+    return await Promise.race([
+      verdict,
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`probe timeout after ${timeoutMs}ms`)),
+          Math.max(1, timeoutMs)
+        );
+      })
+    ]);
+  } catch (_) {
+    return false; // timeout, network error, non-2xx: this stream is dead.
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// Try the resolved streams in order; the first that answers wins.
+//   { url, tried, total }  — url is null when NO stream answered (no handoff).
+// Same default-fetch arming as createSportsFeed: in node --test without an
+// injected fetch this probes nothing and never touches the network.
+export async function pickPlayableStream(
+  streams,
+  { fetchImpl = null, timeoutMs = SPORTS_PROBE_TIMEOUT_MS } = {}
+) {
+  const candidates = probeCandidates(streams);
+  const fetchFn =
+    fetchImpl ||
+    (typeof window !== "undefined" && typeof fetch === "function" ? fetch.bind(globalThis) : null);
+  if (!candidates.length || !fetchFn) {
+    return { url: null, tried: 0, total: candidates.length };
+  }
+  let tried = 0;
+  for (const url of candidates) {
+    tried += 1;
+    if (await probeUrlOnce(fetchFn, url, timeoutMs)) {
+      return { url, tried, total: candidates.length };
+    }
+  }
+  return { url: null, tried, total: candidates.length };
+}
+
 // Feed instance --------------------------------------------------------------
 
 // fetchJson with one bounded attempt: the fetch races a timer so a hanging

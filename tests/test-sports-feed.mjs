@@ -25,6 +25,7 @@ import {
   partitionEvents,
   buildSections,
   formatKickoffTime,
+  pickPlayableStream,
   createSportsFeed
 } from "../js/core/sports/sportsFeed.js";
 
@@ -400,6 +401,96 @@ describe("resolveStreams: the real /stream/tv/<id>.json mapping, one attempt onl
     const result = await feed.resolveStreams("");
     assert.equal(result.status, "error");
     assert.equal(calls.length, 0);
+  });
+});
+
+// Probe: the addon marks its URLs `verified: false` and they were measured
+// 404. Before the player handoff every candidate gets ONE bounded request:
+//   - a playlist URL (m3u8/m3u) must answer 2xx with a body starting #EXTM3U;
+//   - any non-playlist URL only needs a 2xx.
+// Streams are tried in order; the first that answers wins; none -> no handoff.
+describe("probe: pickPlayableStream verifies the stream before the player handoff", () => {
+  const m3u8Response = (body = "#EXTM3U\n#EXT-X-VERSION:3") => ({
+    ok: true,
+    status: 200,
+    text: async () => body
+  });
+
+  function probeWith(routes, { timeoutMs = 100 } = {}) {
+    const calls = [];
+    const fetchImpl = async (url) => {
+      calls.push(url);
+      const hit = routes[url];
+      if (!hit) throw new Error(`unexpected probe url: ${url}`);
+      if (typeof hit === "function") return hit();
+      return hit;
+    };
+    return { calls, run: (streams) => pickPlayableStream(streams, { fetchImpl, timeoutMs }) };
+  }
+
+  test("mixed list skips the dead one: the first 2xx #EXTM3U playlist wins", async () => {
+    const dead = "https://dead.example/stream.m3u8";
+    const good = "https://esencialsport.attendanceos.app/rblive/playlist.m3u8?s=1";
+    const { calls, run } = probeWith({ [dead]: { ok: false, status: 404, text: async () => "" }, [good]: m3u8Response() });
+    const probe = await run([{ name: "a", url: dead }, { name: "b", url: good }]);
+    assert.equal(probe.url, good);
+    assert.equal(probe.tried, 2);
+    assert.equal(probe.total, 2);
+    assert.deepEqual(calls, [dead, good]);
+    assert.equal(calls.filter((u) => u === dead).length, 1, "one attempt per stream — no retries");
+  });
+
+  test("all failing -> no navigation: url is null and every stream was tried once", async () => {
+    const a = "https://a.example/s.m3u8";
+    const b = "https://b.example/s.m3u8";
+    const { calls, run } = probeWith({ [a]: { ok: false, status: 404, text: async () => "" }, [b]: { ok: false, status: 500, text: async () => "" } });
+    const probe = await run([{ url: a }, { url: b }]);
+    assert.equal(probe.url, null);
+    assert.equal(probe.tried, 2);
+    assert.deepEqual(calls, [a, b]);
+  });
+
+  test("a 200 playlist whose body does not start with #EXTM3U is dead; a later candidate wins", async () => {
+    const html = "https://html.example/s.m3u8";
+    const good = "https://good.example/s.m3u8";
+    const { run } = probeWith({ [html]: m3u8Response("<html>not a playlist</html>"), [good]: m3u8Response() });
+    const probe = await run([{ url: html }, { url: good }]);
+    assert.equal(probe.url, good);
+    assert.equal(probe.tried, 2);
+  });
+
+  test("a non-playlist URL answers with any 2xx, body irrelevant", async () => {
+    const seg = "https://x.example/seg.ts";
+    const { run } = probeWith({ [seg]: { ok: true, status: 200, text: async () => "" } });
+    const probe = await run([{ url: seg }]);
+    assert.equal(probe.url, seg);
+    assert.equal(probe.tried, 1);
+  });
+
+  test("a hanging probe is bounded by the timeout: it fails, it never hangs the screen", async () => {
+    const hung = "https://hang.example/s.m3u8";
+    const { run } = probeWith({ [hung]: () => new Promise(() => {}) }, { timeoutMs: 20 });
+    const probe = await run([{ url: hung }]);
+    assert.equal(probe.url, null);
+    assert.equal(probe.tried, 1);
+  });
+
+  test("a probe fetch that throws counts that stream as failed, once", async () => {
+    const bad = "https://throw.example/s.m3u8";
+    const { calls, run } = probeWith({ [bad]: () => { throw new Error("boom"); } });
+    const probe = await run([{ url: bad }]);
+    assert.equal(probe.url, null);
+    assert.equal(probe.tried, 1);
+    assert.equal(calls.length, 1);
+  });
+
+  test("candidates without a usable url are skipped without any request", async () => {
+    const { calls, run } = probeWith({});
+    const probe = await run([{ name: "no-url" }, { url: "   " }, null]);
+    assert.equal(probe.url, null);
+    assert.equal(probe.tried, 0);
+    assert.equal(probe.total, 0);
+    assert.deepEqual(calls, []);
   });
 });
 

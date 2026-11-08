@@ -14,8 +14,10 @@ import {
   SPORTS_ROW_HEIGHT,
   buildMatchRows,
   matchRowTitle,
-  pendingNoticeText
+  pendingNoticeText,
+  probeFailedNoticeText
 } from "../js/ui/screens/sports/sportsScreenMethods-02-render.js";
+import { parseEvents, buildSections } from "../js/core/sports/sportsFeed.js";
 
 const screenSource = readFileSync(
   new URL("../js/ui/screens/sports/sportsScreen.js", import.meta.url),
@@ -164,6 +166,47 @@ describe("resolve -> player handoff", () => {
   test("resolve errors and empty streams surface the honest failure copy", () => {
     assert.match(renderSource, /No hay señal para este partido/);
     assert.match(interactSource, /SPORTS_NO_SIGNAL_TEXT/);
+  });
+});
+
+describe("probe before hand-off and player recovery", () => {
+  const playerSource = readFileSync(
+    new URL("../js/ui/screens/player/playerScreenMethods-70-on-pointer-activate.js", import.meta.url),
+    "utf8"
+  );
+  const exitStart = playerSource.indexOf("exitPlayerOnBack()");
+  const exitEnd = playerSource.indexOf("consumeBackRequest()");
+  const exitBody = playerSource.slice(exitStart, exitEnd);
+
+  test("Enter probes the resolved streams BEFORE navigating; the hand-off only follows a successful probe", () => {
+    const probeIdx = interactSource.indexOf("pickPlayableStream");
+    const navIdx = interactSource.indexOf('Router.navigate("player"');
+    assert.ok(probeIdx > 0, "the resolved streams are probed before the hand-off");
+    assert.ok(navIdx > probeIdx, "the player navigation happens only after the probe answers");
+    assert.match(interactSource, /if \(!probe\.url\)/, "a failed probe must not navigate");
+  });
+
+  test("a probe that finds no live signal shows the honest copy with the count tried", () => {
+    assert.equal(probeFailedNoticeText(3), "La señal del addon no responde (3 señales probadas)");
+    assert.equal(probeFailedNoticeText(1), "La señal del addon no responde (1 señal probada)");
+    assert.equal(probeFailedNoticeText(0), "La señal del addon no responde");
+  });
+
+  test("an empty day (real payload shape) renders the honest empty copy, never a black area", () => {
+    const events = parseEvents({ generatedAt: "2026-01-15T10:00:00Z", count: 0, events: [] });
+    const rows = buildMatchRows(buildSections(events), false);
+    assert.equal(rows.some((row) => row.type === "match"), false);
+    // The renderer's no-match branch shows the empty copy instead of nothing.
+    assert.match(renderSource, /hasMatches[\s\S]{0,200}SPORTS_EMPTY_TEXT/);
+  });
+
+  test("the player exit contract honours returnRoute sports: failed playback returns to Sports, not Home", () => {
+    assert.ok(exitStart >= 0 && exitEnd > exitStart, "exitPlayerOnBack exists");
+    assert.match(exitBody, /"live"/, "the existing live return route is kept");
+    assert.match(exitBody, /"sports"/, "the sports return route is honoured");
+    assert.match(exitBody, /popToExistingRoute/, "the exit consumes the player entry, no re-open loop");
+    assert.match(exitBody, /Router\.navigate\(\s*returnRoute/, "the fallback exits to the declared route");
+    assert.match(exitBody, /navigateBackToStreamScreen\(\)/, "every other case keeps the stream-screen exit");
   });
 });
 
