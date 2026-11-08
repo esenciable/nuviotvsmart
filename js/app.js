@@ -514,6 +514,75 @@ function setupTizenPlaybackLifecycle() {
   });
 }
 
+function probeMemoryBudget() {
+  // A Samsung TV kills apps that exceed its memory budget, and this panel exposes
+  // no other way to read it. Reports the hints the web engine offers so the budget
+  // is measured instead of assumed.
+  try {
+    void import("./core/diagnostics/runtimeBeacon.js")
+      .then((mod) =>
+        mod.sendRuntimeBeacon({
+          phase: "memory",
+          deviceMemory: Number(globalThis.navigator?.deviceMemory || 0) || null,
+          hardwareConcurrency: Number(globalThis.navigator?.hardwareConcurrency || 0) || null,
+          devicePixelRatio: Number(globalThis.devicePixelRatio || 0) || null,
+          heapLimitMb: globalThis.performance?.memory?.jsHeapSizeLimit
+            ? Math.round(globalThis.performance.memory.jsHeapSizeLimit / 1048576)
+            : null,
+          heapTotalMb: globalThis.performance?.memory?.totalJSHeapSize
+            ? Math.round(globalThis.performance.memory.totalJSHeapSize / 1048576)
+            : null,
+          heapUsedMb: globalThis.performance?.memory?.usedJSHeapSize
+            ? Math.round(globalThis.performance.memory.usedJSHeapSize / 1048576)
+            : null
+        })
+      )
+      .catch(() => {});
+  } catch (_) {
+    // Diagnostics only.
+  }
+}
+
+function probePlayerCapabilities() {
+  // Which playback engines this panel can actually give us. hls.js needs MSE; if
+  // it is missing the ladder falls to AVPlay, which cannot carry the CDN headers
+  // without the EngineFS proxy this device cannot run. Reported once at boot.
+  try {
+    const report = (payload) => {
+      void import("./core/diagnostics/runtimeBeacon.js")
+        .then((mod) => mod.sendRuntimeBeacon(payload))
+        .catch(() => {});
+    };
+    const mediaSource = globalThis.MediaSource || globalThis.ManagedMediaSource;
+    const mse = typeof mediaSource !== "undefined";
+    let h264 = false;
+    let ts = false;
+    try {
+      h264 = Boolean(mediaSource?.isTypeSupported?.('video/mp4; codecs="avc1.42E01E,mp4a.40.2"'));
+      ts = Boolean(mediaSource?.isTypeSupported?.('video/mp2t; codecs="avc1.42E01E,mp4a.40.2"'));
+    } catch (_) {
+      // Capability probing must never break boot.
+    }
+    let nativeHls = false;
+    try {
+      const video = document.createElement("video");
+      nativeHls = Boolean(video.canPlayType?.("application/vnd.apple.mpegurl"));
+    } catch (_) {
+      // Same.
+    }
+    report({
+      phase: "player",
+      mse,
+      h264,
+      ts,
+      nativeHls,
+      avplay: Boolean(globalThis.avplay || globalThis.webapis?.avplay)
+    });
+  } catch (_) {
+    // Diagnostics only.
+  }
+}
+
 function probeCrossOriginRead() {
   // One-shot diagnostic for a device with no logs: can this runtime READ a
   // cross-origin response from a host that sends no CORS headers? Tizen widgets
@@ -655,6 +724,8 @@ async function bootstrapApp() {
   // runtime and the network service are independent capabilities.
   startPluginRuntimeSelfTest();
   probeCrossOriginRead();
+  probePlayerCapabilities();
+  probeMemoryBudget();
   applyPerformanceMode();
   markBootStage("Loading language resources");
   await I18n.init();
