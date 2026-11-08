@@ -192,6 +192,18 @@ export function createPlayerScreenMethods70() {
         this.pauseOverlayTimer
       );
     },
+    // A channel is tuned in from Live TV, which is not a "stream" screen, so the
+    // default exit (navigateBackToStreamScreen) fell through to Home. Honour the
+    // route that opened the player when it declared one.
+    exitPlayerOnBack() {
+      const returnRoute = String(this.params?.returnRoute || "");
+      if (returnRoute === "live") {
+        Router.navigate("live", {}, { isBackNavigation: true });
+        return true;
+      }
+      return this.navigateBackToStreamScreen();
+    },
+
     consumeBackRequest() {
       if (this.isStartupErrorVisible()) {
         if (this.navigateBackToStreamScreen()) {
@@ -302,7 +314,7 @@ export function createPlayerScreenMethods70() {
       }
 
       if (this.loadingVisible && !this.hasPresentedPlaybackFrame) {
-        return this.navigateBackToStreamScreen();
+        return this.exitPlayerOnBack();
       }
 
       // Match Android TV: when the on screen controls are showing, Back hides
@@ -314,7 +326,7 @@ export function createPlayerScreenMethods70() {
       }
 
       this.nextEpisodeBackExitArmed = false;
-      return this.navigateBackToStreamScreen();
+      return this.exitPlayerOnBack();
     }
   };
 }

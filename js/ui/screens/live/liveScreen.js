@@ -22,6 +22,25 @@ export {
   t
 };
 
+// Pure layout helpers live in the render module; they are re-exported here
+// so the sibling method modules can reach them through `internals` and the
+// layout tests can import them directly.
+export {
+  ALL_CHIP_ID,
+  FAVORITES_CHIP_ID,
+  FAVORITES_STORAGE_KEY,
+  sourceNameFromChannelId,
+  sourceNameFromColumnId,
+  formatChipLabel,
+  formatChannelRowLabel,
+  channelLogoInfo,
+  normalizeSearchText,
+  channelMatchesQuery,
+  readFavoriteIds,
+  writeFavoriteIds,
+  toggleFavoriteId
+} from "./liveScreenMethods-02-render.js";
+
 function isBackEvent(event) {
   return Environment.isBackEvent(event);
 }
