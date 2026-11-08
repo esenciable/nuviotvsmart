@@ -2,7 +2,6 @@
 import * as internals from "./liveScreen.js";
 import {
   clampIndex,
-  shouldAcceptRepeatMove,
   collapsedSourceIdsRef,
   toggleSourceCollapsed,
   railMoveIndex,
@@ -15,12 +14,6 @@ import {
 } from "./liveScreenMethods-02-render.js";
 
 const NOTICE_VISIBLE_MS = 6000;
-
-// Fluidity: a held remote key auto-repeats much faster than a 110ms scroll
-// animation can settle. Repeats faster than the cadence are coalesced so the
-// list advances at a steady pace instead of queuing.
-const MOVE_CADENCE_MS = 90;
-const SCROLL_ANIMATE_MS = 110;
 
 function reportLiveErrorSafe(error, where) {
   try {
@@ -109,7 +102,7 @@ export function createLiveScreenMethods03() {
       if (this.focusZone === "hero") {
         // Only the search and guide pills live here.
         this.heroIndex = clampIndex((this.heroIndex || 0) + delta, 2);
-        this.applyFocusState({ smooth: true });
+        this.applyFocusState();
         return;
       }
       if (this.focusZone === "rail") {
@@ -124,13 +117,13 @@ export function createLiveScreenMethods03() {
       if (delta > 0) {
         if (this.rowFocusTarget !== "star") {
           this.rowFocusTarget = "star";
-          this.applyFocusState({ smooth: true });
+          this.applyFocusState();
         }
         return;
       }
       if (this.rowFocusTarget === "star") {
         this.rowFocusTarget = "row";
-        this.applyFocusState({ smooth: true });
+        this.applyFocusState();
         return;
       }
       this.returnToRail();
@@ -141,7 +134,7 @@ export function createLiveScreenMethods03() {
         // DOWN returns to the rail; UP from the pills has nowhere to go.
         if (delta > 0) {
           this.focusZone = "rail";
-          this.applyFocusState({ smooth: true });
+          this.applyFocusState();
         }
         return;
       }
@@ -151,7 +144,7 @@ export function createLiveScreenMethods03() {
         const rows = this.visibleChannels();
         if (!rows.length) {
           this.focusZone = "rail";
-          this.applyFocusState({ smooth: true });
+          this.applyFocusState();
           return;
         }
         if (delta < 0 && (this.rowIndex || 0) <= 0) {
@@ -169,7 +162,7 @@ export function createLiveScreenMethods03() {
         if (this.heroChannel) {
           this.focusZone = "hero";
           this.heroIndex = 0;
-          this.applyFocusState({ smooth: true });
+          this.applyFocusState();
         }
         return;
       }
@@ -202,39 +195,29 @@ export function createLiveScreenMethods03() {
     },
 
     // Rail movement ----------------------------------------------------------
-    // One rail item per keypress: coalesce auto-repeats faster than the
-    // scroll animation, then reposition focus by toggling classes only
-    // (never a re-render).
+    // One rail item per keypress: reposition focus by toggling classes only
+    // (never a re-render). Held arrows repeat at the platform's own rate —
+    // no coalescing, matching every other screen.
     moveRail(delta) {
       const items = this.railItems();
       if (!items.length) return;
-      const now = Date.now();
-      if (!shouldAcceptRepeatMove(this.lastRailMoveAt, now, MOVE_CADENCE_MS)) {
-        return;
-      }
-      this.lastRailMoveAt = now;
       // Index-based over the CURRENT list, clamped at both ends: no wrap, no
       // jump. At a boundary the index does not move and the ring stays put.
       const next = railMoveIndex(items, this.railIndex, delta);
       if (next === this.railIndex) return;
       this.setRailFocusIndex(next);
-      this.applyFocusState({ smooth: true });
+      this.applyFocusState();
     },
 
     // Rows movement ----------------------------------------------------------
     moveRows(delta) {
       const rows = this.visibleChannels();
       if (!rows.length) return;
-      const now = Date.now();
-      if (!shouldAcceptRepeatMove(this.lastRowMoveAt, now, MOVE_CADENCE_MS)) {
-        return;
-      }
-      this.lastRowMoveAt = now;
       const next = clampIndex((this.rowIndex || 0) + delta, rows.length);
       if (next === this.rowIndex) return;
       this.rowIndex = next;
       this.rowFocusTarget = "row";
-      this.applyFocusState({ smooth: true });
+      this.applyFocusState();
     },
 
     // LEFT from a row (or UP past the first row) goes back to the rail at the
@@ -246,7 +229,7 @@ export function createLiveScreenMethods03() {
       if (selectionIndex >= 0) {
         this.setRailFocusIndex(selectionIndex);
       }
-      this.applyFocusState({ smooth: true });
+      this.applyFocusState();
     },
 
     // Enter (or RIGHT) on the focused rail row.
@@ -281,15 +264,12 @@ export function createLiveScreenMethods03() {
       toggleSourceCollapsed(collapsedSourceIdsRef(), railId);
       if (this.toggleSourceRowsInPlace(item, willExpand)) {
         this.reindexRailDom();
-        // The rail's geometry changed (rows inserted/removed): refresh the
-        // cached offsets once so the next keypress still uses the cache.
-        this.cacheLayoutMetrics?.();
         // Identity-based focus recovery: the toggled header KEEPS the ring
         // (its railId survives, so its index), a focused category whose rows
         // just vanished lands on its source's header, and anything else
         // clamps into the changed list. Focus never rests on a missing node.
         this.setRailFocusIndex(railFocusAfterChange(this.railItems(), previousIndex, previousItem));
-        this.applyFocusState({ smooth: true });
+        this.applyFocusState();
         return;
       }
       this.updateRowsOnly();
@@ -383,7 +363,7 @@ export function createLiveScreenMethods03() {
       const next = keyboardMove(KEYBOARD_KEYS, this.keyboardIndex || 0, dx, dy);
       if (next === this.keyboardIndex) return;
       this.keyboardIndex = next;
-      this.applyFocusState({ smooth: true });
+      this.applyFocusState();
     },
 
     // Enter on a key: chars/ESPACIO/BORRAR/LIMPIAR update the query purely,
@@ -437,102 +417,6 @@ export function createLiveScreenMethods03() {
     // Guide ------------------------------------------------------------------
     // No EPG source exists, so there is no guide control on the hero and no
     // guide screen to open.
-
-    // Layout metrics cache --------------------------------------------------
-    // THE fluidity rule: no DOM measurement per keypress. After each real
-    // render, after expand/collapse and on resize, the focusable rows' offsets
-    // (relative to their scroll panel, via offsetParent) plus each panel's
-    // clientHeight/scrollHeight are cached here. The move handler only reads
-    // this cache — never getBoundingClientRect, offsetTop or clientHeight.
-    cacheLayoutMetrics() {
-      try {
-        const container = this.container;
-        if (!container) return;
-        const metrics = new Map();
-        for (const panel of container.querySelectorAll(".live-rail, .live-channel-list, .live-keyboard-grid")) {
-          const rows = new Map();
-          for (const node of panel.querySelectorAll(".focusable")) {
-            rows.set(node, { top: node.offsetTop, height: node.offsetHeight });
-          }
-          metrics.set(panel, {
-            rows,
-            viewHeight: panel.clientHeight,
-            scrollRange: Math.max(0, panel.scrollHeight - panel.clientHeight)
-          });
-        }
-        this.layoutMetrics = metrics;
-      } catch (error) {
-        reportLiveErrorSafe(error, "cacheLayoutMetrics");
-      }
-    },
-
-    // Keep the focused node inside its panel (rail or channel list) using ONLY
-    // the cached offsets: the smallest movement that makes it fully visible,
-    // animated over a short ease so held keys never lag behind the scroll.
-    // A keypress must never trigger a DOM measurement here.
-    ensureFocusVisible({ smooth = true } = {}) {
-      try {
-        const focused = this.container?.querySelector(".focusable.focused");
-        if (!focused) {
-          return;
-        }
-        const panel = focused.closest(".live-rail, .live-channel-list, .live-keyboard-grid");
-        if (!panel) {
-          return;
-        }
-        const panelMetrics = this.layoutMetrics instanceof Map ? this.layoutMetrics.get(panel) : null;
-        const entry = panelMetrics?.rows instanceof Map ? panelMetrics.rows.get(focused) : null;
-        if (!entry) {
-          // No cached entry for this node yet (it appears with the next real
-          // render / recache). Doing nothing keeps the keypress cheap; it can
-          // never trigger a per-move measurement.
-          return;
-        }
-        const margin = 16;
-        const top = Number(panel.scrollTop) || 0;
-        let delta = 0;
-        if (entry.top < top + margin) {
-          delta = entry.top - top - margin;
-        } else if (entry.top + entry.height > top + panelMetrics.viewHeight - margin) {
-          delta = entry.top + entry.height - top - panelMetrics.viewHeight + margin;
-        }
-        if (!delta) {
-          return;
-        }
-        const target = Math.min(panelMetrics.scrollRange, Math.max(0, top + delta));
-        if (smooth) {
-          this.animateListScroll(panel, target);
-        } else {
-          panel.scrollTop = target;
-        }
-      } catch (error) {
-        reportLiveErrorSafe(error, "ensureFocusVisible");
-      }
-    },
-
-    // Short eased scroll (~110ms, ease-out cubic). A new target replaces the
-    // running animation instead of queueing behind it.
-    animateListScroll(panel, top) {
-      if (this.listScrollFrame && typeof cancelAnimationFrame === "function") {
-        cancelAnimationFrame(this.listScrollFrame);
-      }
-      this.listScrollFrame = 0;
-      const from = panel.scrollTop;
-      const delta = top - from;
-      if (Math.abs(delta) < 1) return;
-      if (typeof requestAnimationFrame !== "function") {
-        panel.scrollTop = top;
-        return;
-      }
-      const start = globalThis.performance?.now ? performance.now() : Date.now();
-      const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
-      const step = (now) => {
-        const t = Math.min(1, Math.max(0, (now - start) / SCROLL_ANIMATE_MS));
-        panel.scrollTop = from + delta * easeOutCubic(t);
-        this.listScrollFrame = t < 1 ? requestAnimationFrame(step) : 0;
-      };
-      this.listScrollFrame = requestAnimationFrame(step);
-    },
 
     // Temporary probe: a TV gives no logs, so each channel logo reports whether
     // it actually decoded (naturalWidth) or errored. Decides between "the image

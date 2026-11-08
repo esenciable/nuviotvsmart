@@ -20,10 +20,10 @@ import * as internals from "./liveScreen.js";
 // thumbnail.
 //
 // Focus is deterministic state (focusZone + railIndex / rowIndex /
-// rowFocusTarget + heroIndex), never geometry. Movement must be fluid: a focus
-// change only toggles classes (no re-render), scrolling is the smallest
-// movement animated over ~110ms, and key repeats faster than the cadence are
-// coalesced.
+// rowFocusTarget + heroIndex), never geometry. Movement must feel exactly
+// like the rest of the app: a focus change only toggles classes (no
+// re-render) and calls node.focus(), letting the browser reveal the focused
+// element natively — no scroll animation and no repeat throttling.
 //
 // Styles are inlined because the screen ships without a dedicated stylesheet.
 // Palette from the 960x540 reference scaled x2 for the 1920x1080 surface:
@@ -460,13 +460,6 @@ export function railFocusAfterChange(nextItems, previousIndex, previousItem) {
 // Fluidity: held-key auto-repeat must advance the list at a steady cadence
 // instead of queuing behind the scroll animation. A repeat faster than the
 // cadence is dropped.
-export function shouldAcceptRepeatMove(lastMoveAt, now, cadenceMs) {
-  const last = Number(lastMoveAt);
-  if (!Number.isFinite(last) || last <= 0) return true;
-  const cadence = Number(cadenceMs);
-  if (!Number.isFinite(cadence) || cadence <= 0) return true;
-  return Number(now) - last >= cadence;
-}
 
 // Rendering ----------------------------------------------------------------
 
@@ -477,10 +470,10 @@ export function createLiveScreenMethods02() {
     <style id="live-screen-style">
       /* STATIC LAYOUT CONTRACT (measured from the Android TV reference, dp x1.5):
          every box has a fixed size. Nothing may resize on focus — a keypress
-         only toggles classes, writes hero text/src and scrolls. The focus
-         state is a fill plus an inner ring: no scale, no elevation, no layout
-         change, and no size/position transition (only a short background-color
-         fade where allowed). */
+         only toggles classes, writes hero text/src and lets the browser
+         reveal the focused row. The focus state is a fill plus an inner ring:
+         no scale, no elevation, no layout change, and no transition on the
+         focus state at all — the fill and the ring appear in the same frame. */
       .live-shell { position: absolute; inset: 0; width: 100%; height: 100%; display: flex; flex-direction: column; background: #0D0D0D; color: #FFFFFF; overflow: hidden; }
       /* A flex child with overflow does not scroll unless it may shrink below
          its content: min-height:0 / min-width:0 everywhere it matters. Without
@@ -509,7 +502,7 @@ export function createLiveScreenMethods02() {
       .live-hero-source { font-size: 19.5px; line-height: 24px; height: 24px; color: #B3B3B3; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .live-hero-actions { position: absolute; top: 21px; right: 27px; display: flex; gap: 14px; }
       /* Gear/search control: 51x51, radius 15. */
-      .live-pill { display: inline-flex; align-items: center; justify-content: center; width: 51px; height: 51px; background: rgba(13,13,13,0.66); border: 0; border-radius: 15px; color: #B3B3B3; font-size: 19.5px; outline: none; cursor: pointer; box-sizing: border-box; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); transition: background-color 90ms ease; }
+      .live-pill { display: inline-flex; align-items: center; justify-content: center; width: 51px; height: 51px; background: rgba(13,13,13,0.66); border: 0; border-radius: 15px; color: #B3B3B3; font-size: 19.5px; outline: none; cursor: pointer; box-sizing: border-box; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); }
       .live-pill.focused { outline: 2px solid #FFFFFF; outline-offset: -2px; background: #303030; color: #FFFFFF; }
       /* 16:9 preview box: fixed 325x183, radius 18; the logo sits centred. We
          have no frame source, so no fake thumbnail is ever drawn. */
@@ -528,7 +521,7 @@ export function createLiveScreenMethods02() {
       /* Rail tiles: search 45px, group tile 51px, playlist header 48px — all
          fixed. Idle: #0D0D0D at 0.66 + inner hairline; focus: #303030 fill
          plus a 2px white ring painted INSIDE (no scale, no layout change). */
-      .live-rail-row { flex-shrink: 0; display: flex; align-items: center; gap: 14px; height: 51px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 18px; padding: 0 15px 0 18px; outline: 2px solid transparent; outline-offset: -2px; cursor: pointer; box-sizing: border-box; overflow: hidden; transition: background-color 90ms ease; }
+      .live-rail-row { flex-shrink: 0; display: flex; align-items: center; gap: 14px; height: 51px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 18px; padding: 0 15px 0 18px; outline: 2px solid transparent; outline-offset: -2px; cursor: pointer; box-sizing: border-box; overflow: hidden; }
       .live-rail-row.focused { outline-color: #FFFFFF; background: #303030; }
       /* Selected-but-unfocused rail row: 1px ring at alpha 0.8. */
       .live-rail-row.is-selected { box-shadow: inset 0 0 0 1px rgba(245,245,245,0.8); }
@@ -554,7 +547,7 @@ export function createLiveScreenMethods02() {
          are registered in the cached layout metrics like every other panel. */
       .live-keyboard-grid { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; position: relative; display: flex; flex-direction: column; gap: 8px; box-sizing: border-box; }
       .live-keyboard-row { flex-shrink: 0; display: flex; gap: 8px; }
-      .live-key { flex-shrink: 0; display: flex; align-items: center; justify-content: center; height: 44px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 12px; outline: 2px solid transparent; outline-offset: -2px; font-size: 19.5px; line-height: 24px; font-weight: 700; color: #B3B3B3; box-sizing: border-box; cursor: pointer; transition: background-color 90ms ease; }
+      .live-key { flex-shrink: 0; display: flex; align-items: center; justify-content: center; height: 44px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 12px; outline: 2px solid transparent; outline-offset: -2px; font-size: 19.5px; line-height: 24px; font-weight: 700; color: #B3B3B3; box-sizing: border-box; cursor: pointer; }
       .live-key.focused { outline-color: #FFFFFF; background: #303030; color: #FFFFFF; }
       .live-key.is-char { width: 48px; }
       .live-key.is-digit { width: 44px; }
@@ -569,7 +562,7 @@ export function createLiveScreenMethods02() {
       /* Fixed row pitch 57px: tile 51px + 6px gap. Inner padding 15px; the
          62x39 logo box, the 2-line-clamped 21px name and the muted meta line
          all live INSIDE the fixed tile — long text can never grow the row. */
-      .live-channel-row { flex-shrink: 0; display: flex; align-items: center; gap: 14px; height: 51px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 18px; padding: 0 15px; outline: 2px solid transparent; outline-offset: -2px; cursor: pointer; box-sizing: border-box; overflow: hidden; transition: background-color 90ms ease; }
+      .live-channel-row { flex-shrink: 0; display: flex; align-items: center; gap: 14px; height: 51px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 18px; padding: 0 15px; outline: 2px solid transparent; outline-offset: -2px; cursor: pointer; box-sizing: border-box; overflow: hidden; }
       .live-channel-row.focused { outline-color: #FFFFFF; background: #303030; }
       .live-row-logo { position: relative; width: 62px; height: 39px; border-radius: 12px; background: rgba(13,13,13,0.66); overflow: hidden; flex-shrink: 0; }
       .live-row-logo-initial { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 21px; font-weight: 700; color: #808080; }
@@ -636,8 +629,6 @@ export function createLiveScreenMethods02() {
         this.container.innerHTML = shellMarkup;
 
         ScreenUtils.indexFocusables(this.container);
-        // Real render: measure once NOW so the keypress path never has to.
-        this.cacheLayoutMetrics?.();
         const hasLogos = Boolean(this.container.querySelector(".live-row-logo img"));
         if (hasLogos) {
           this.logoProbeCount = (this.logoProbeCount || 0) + 1;
@@ -645,7 +636,7 @@ export function createLiveScreenMethods02() {
             this.probeChannelLogos?.();
           }
         }
-        this.applyFocusState({ smooth: false });
+        this.applyFocusState();
         this.updateHeroForFocus({ force: true });
       } catch (error) {
         // A thrown exception during render used to blank the whole screen
@@ -677,7 +668,7 @@ export function createLiveScreenMethods02() {
           </div>
         `;
         ScreenUtils.indexFocusables(this.container);
-        this.applyFocusState({ smooth: false });
+        this.applyFocusState();
       } catch (_) {
         // Nothing more can be done without a working DOM.
       }
@@ -1009,9 +1000,11 @@ export function createLiveScreenMethods02() {
     },
 
     // Applies the deterministic focus state to the DOM: marks the focused
-    // node and gives it real DOM focus without ever scrolling the document.
-    // This MUST stay cheap: class toggles only, never a re-render.
-    applyFocusState({ smooth = false } = {}) {
+    // node and gives it real DOM focus with the browser's NATIVE reveal —
+    // plain focus() with the default scrolling, exactly like the rest of the
+    // app. No preventScroll, no manual scrollTop, no animation. This MUST
+    // stay cheap: class toggles plus one focus() call, never a re-render.
+    applyFocusState() {
       try {
         this.normalizeFocusState();
         const target = this.focusedNode();
@@ -1020,8 +1013,14 @@ export function createLiveScreenMethods02() {
         });
         if (target) {
           target.classList.add("focused");
-          focusWithoutAutoScrollSafe(target);
-          this.ensureFocusVisible?.({ smooth });
+          // Native reveal: the browser scrolls the focused element into view
+          // in the same operation. The rail, the channel list and the keyboard
+          // grid are all overflow-y:auto panels, so focus() handles them.
+          try {
+            target.focus();
+          } catch (_) {
+            // Focus is best effort on constrained TV engines.
+          }
         }
         // Selected-but-unfocused rail row: a 1px ring marks the active source
         // (class toggle only — never a re-render, never a layout change).
@@ -1192,9 +1191,6 @@ export function createLiveScreenMethods02() {
           this.container.querySelector(".live-body")?.appendChild(nextList);
         }
         ScreenUtils.indexFocusables(this.container);
-        // Real render (data arrival / search typing / favourite toggles):
-        // re-measure once so the keypress path keeps using fresh cached offsets.
-        this.cacheLayoutMetrics?.();
         this.applyFocusState();
         this.updateHeroForFocus({ force: true });
       } catch (error) {
@@ -1202,16 +1198,4 @@ export function createLiveScreenMethods02() {
       }
     }
   };
-}
-
-function focusWithoutAutoScrollSafe(node) {
-  try {
-    internals.focusWithoutAutoScroll(node);
-  } catch (_) {
-    try {
-      node?.focus?.();
-    } catch (_) {
-      // Focus is best effort on constrained TV engines.
-    }
-  }
 }

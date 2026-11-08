@@ -31,8 +31,7 @@ import {
   collapsedSourceIdsRef,
   isSourceExpanded,
   toggleSourceCollapsed,
-  clampIndex,
-  shouldAcceptRepeatMove
+  clampIndex
 } from "../js/ui/screens/live/liveScreenMethods-02-render.js";
 
 describe("sourceNameFromChannelId", () => {
@@ -356,23 +355,6 @@ describe("clampIndex (focus never lands outside the list)", () => {
   });
 });
 
-describe("shouldAcceptRepeatMove (coalesce held-key repeats)", () => {
-  const cadence = 90;
-
-  test("the first move of a burst is always accepted", () => {
-    assert.equal(shouldAcceptRepeatMove(undefined, 1000, cadence), true);
-    assert.equal(shouldAcceptRepeatMove(0, 1000, cadence), true);
-  });
-
-  test("a repeat faster than the cadence is dropped", () => {
-    assert.equal(shouldAcceptRepeatMove(1000, 1000 + cadence - 1, cadence), false);
-  });
-
-  test("a repeat at or after the cadence advances the list again", () => {
-    assert.equal(shouldAcceptRepeatMove(1000, 1000 + cadence, cadence), true);
-  });
-});
-
 describe("Android TV reference layout (source contract)", () => {
   const renderSource = readFileSync(
     new URL("../js/ui/screens/live/liveScreenMethods-02-render.js", import.meta.url),
@@ -432,8 +414,9 @@ describe("Android TV reference layout (source contract)", () => {
     assert.match(renderSource, /\.live-rail-row\.focused\s*\{[^}]*#303030/);
     assert.match(renderSource, /\.live-rail-row\s*\{[^}]*outline:\s*2px solid transparent[^}]*outline-offset:\s*-2px/);
     assert.match(renderSource, /\.live-channel-row\.focused\s*\{[^}]*#303030/);
-    // Only a short background-color fade is allowed.
-    assert.match(renderSource, /transition:\s*background-color/);
+    // Instant focus, like the Android TV reference: the fill and the ring
+    // appear in the same frame — no transition on the focused row or rail item.
+    assert.doesNotMatch(renderSource, /transition:\s*background-color/);
   });
 
   test("the old layouts are gone: no chips row, no mobile group cards, no full-width header", () => {
@@ -449,15 +432,29 @@ describe("Android TV reference layout (source contract)", () => {
     assert.match(renderSource, /live-star/);
   });
 
-  test("focus movement toggles classes instead of re-rendering, and coalesces repeats", () => {
-    assert.match(tuneSource, /MOVE_CADENCE_MS/);
+  test("focus movement toggles classes instead of re-rendering, with no repeat throttling", () => {
     assert.match(tuneSource, /moveRail|moveRows/);
     assert.match(tuneSource, /applyFocusState/);
+    // Held arrows move at the platform's own rate: the auto-repeat coalescing
+    // that dropped repeats faster than 90ms is gone.
+    assert.doesNotMatch(tuneSource, /MOVE_CADENCE_MS/);
+    assert.doesNotMatch(tuneSource, /shouldAcceptRepeatMove\s*\(/);
+    assert.doesNotMatch(tuneSource, /Date\.now/);
   });
 
-  test("short eased scroll, never a long smooth scroll", () => {
-    assert.match(tuneSource, /SCROLL_ANIMATE_MS/);
-    assert.doesNotMatch(tuneSource, /behavior:\s*"smooth"/);
+  test("native reveal: focus calls node.focus() with the browser's default scrolling", () => {
+    // No eased scrollTop, no cancel/replace bookkeeping, no smooth behaviour.
+    assert.doesNotMatch(tuneSource, /SCROLL_ANIMATE_MS|animateListScroll|ensureFocusVisible/);
+    assert.doesNotMatch(renderSource, /animateListScroll|ensureFocusVisible/);
+    assert.doesNotMatch(renderSource + tuneSource, /behavior:\s*["']smooth["']/);
+    // The focus application path must use the browser's native reveal.
+    const applyStart = renderSource.indexOf("applyFocusState() {");
+    assert.ok(applyStart >= 0, "applyFocusState exists");
+    const applyEnd = renderSource.indexOf("focusedNode() {", applyStart);
+    assert.ok(applyEnd > applyStart, "focusedNode follows applyFocusState");
+    const applyPath = renderSource.slice(applyStart, applyEnd);
+    assert.match(applyPath, /target\.focus\(\)/);
+    assert.doesNotMatch(applyPath, /preventScroll|focusWithoutAutoScroll/);
   });
 
   test("tuning persists the channel into Vistos recientemente and hands off with returnRoute live", () => {
@@ -534,10 +531,10 @@ describe("static layout contract (no reflow on focus)", () => {
     assert.doesNotMatch(name, /white-space:\s*nowrap/);
   });
 
-  test("no size transitions: only background-color, opacity and transform may transition", () => {
+  test("no size transitions and no focus transition: only opacity and transform may transition", () => {
     const declarations = style.match(/transition:[^;}]*/g) || [];
     assert.ok(declarations.length > 0, "the stylesheet declares transitions");
-    const allowed = new Set(["background-color", "opacity", "transform"]);
+    const allowed = new Set(["opacity", "transform"]);
     for (const declaration of declarations) {
       const properties = declaration
         .replace(/^transition:/, "")
@@ -548,7 +545,7 @@ describe("static layout contract (no reflow on focus)", () => {
       for (const property of properties) {
         assert.ok(
           allowed.has(property),
-          `transition property "${property}" is not allowed (size properties must never transition): ${declaration}`
+          `transition property "${property}" is not allowed (the focus fill/ring must appear in one frame, and size properties must never transition): ${declaration}`
         );
       }
     }
@@ -564,24 +561,12 @@ describe("static layout contract (no reflow on focus)", () => {
     assert.doesNotMatch(heroPath, /replaceWith|removeChild|appendChild|insertAdjacentHTML|renderHero/);
   });
 
-  test("scroll decisions read cached offsets, never per-keypress DOM measurement", () => {
-    const start = tuneSource.indexOf("ensureFocusVisible(");
-    const end = tuneSource.indexOf("animateListScroll(", start);
-    assert.ok(start >= 0 && end > start, "ensureFocusVisible exists before animateListScroll");
-    const scrollPath = tuneSource.slice(start, end);
-    for (const banned of ["getBoundingClientRect", "offsetTop", "offsetHeight", "clientHeight", "scrollHeight"]) {
-      assert.doesNotMatch(scrollPath, new RegExp(banned));
-    }
-    // The cache exists and is rebuilt after each real render: initial render,
-    // data refresh (updateRowsOnly), source expand/collapse and window resize.
-    assert.match(tuneSource, /cacheLayoutMetrics/);
-    assert.ok((renderSource.match(/cacheLayoutMetrics/g) || []).length >= 2, "render and updateRowsOnly rebuild the cache");
-    assert.match(tuneSource, /toggleSource[\s\S]*cacheLayoutMetrics/);
-    assert.match(mountSource, /addEventListener\(\s*["']resize["']/);
-    assert.match(mountSource, /cacheLayoutMetrics/);
+  test("the offsets cache is gone: the browser reveals the focused row, not a manual scrollTop", () => {
+    assert.doesNotMatch(tuneSource, /cacheLayoutMetrics|layoutMetrics|ensureFocusVisible|animateListScroll|SCROLL_ANIMATE_MS/);
+    assert.doesNotMatch(renderSource, /cacheLayoutMetrics/);
+    assert.doesNotMatch(mountSource, /onLiveResize/, "the resize listener only refreshed the offsets cache");
     // The keypress handler itself never measures and never sends per-key
-    // telemetry: it may only change state, toggle classes, patch the hero
-    // and scroll.
+    // telemetry: it may only change state and toggle classes.
     const keydownStart = tuneSource.indexOf("onKeyDown(event)");
     const keydownEnd = tuneSource.indexOf("handleHorizontal(delta)", keydownStart);
     assert.ok(keydownStart >= 0 && keydownEnd > keydownStart, "onKeyDown exists before handleHorizontal");
@@ -676,20 +661,11 @@ describe("on-screen search keyboard (no system IME, no <input>)", () => {
     assert.doesNotMatch(caret, /(?<!min-)width:\s*auto|width:\s*\d+%/);
   });
 
-  test("keyboard keys use the shared .focusable machinery and the cached layout metrics", () => {
-    assert.match(renderSource, /live-keyboard-grid[^"]*"/);
-    assert.match(
-      tuneSource,
-      /querySelectorAll\("\.live-rail, \.live-channel-list, \.live-keyboard-grid"\)/,
-      "cacheLayoutMetrics registers the keyboard keys"
-    );
-    assert.match(
-      tuneSource,
-      /closest\("\.live-rail, \.live-channel-list, \.live-keyboard-grid"\)/,
-      "ensureFocusVisible resolves the keyboard panel"
-    );
+  test("keyboard keys use the shared .focusable machinery", () => {
+    assert.match(renderSource, /live-keyboard-grid/);
+    assert.match(renderSource, /data-action="keyboardKey"/);
+    assert.match(renderSource, /data-key-index=/, "keys are addressable through the flat key model");
   });
-
   test("the keyboard grid is a shrinkable scroll panel like rail and channel list", () => {
     const grid = ruleBody(".live-keyboard-grid");
     assert.match(grid, /overflow-y:\s*auto/);

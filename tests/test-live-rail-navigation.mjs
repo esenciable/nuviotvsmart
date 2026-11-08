@@ -241,15 +241,36 @@ describe("source contract: the DOM renders exactly one row per model item", () =
     assert.match(mountSource, /railFocusId/, "the focused railId is tracked from mount");
   });
 
-  test("the cheap path is preserved: coalesced repeats, no per-keypress measurement, eased scroll", () => {
-    assert.match(tuneSource, /MOVE_CADENCE_MS/);
-    assert.match(tuneSource, /SCROLL_ANIMATE_MS/);
+  test("the cheap path is preserved: one item per move, no per-keypress measurement, no repeat throttling", () => {
     const moveStart = tuneSource.indexOf("moveRail(delta)");
     const moveEnd = tuneSource.indexOf("moveRows(delta)", moveStart);
     assert.ok(moveStart >= 0 && moveEnd > moveStart, "moveRail exists");
     const movePath = tuneSource.slice(moveStart, moveEnd);
-    for (const banned of ["getBoundingClientRect", "offsetTop", "offsetHeight", "clientHeight", "scrollHeight", "innerHTML"]) {
+    for (const banned of [
+      "getBoundingClientRect",
+      "offsetTop",
+      "offsetHeight",
+      "clientHeight",
+      "scrollHeight",
+      "innerHTML",
+      "Date.now",
+      "shouldAcceptRepeatMove",
+      "MOVE_CADENCE_MS"
+    ]) {
       assert.doesNotMatch(movePath, new RegExp(banned));
     }
+    // Native reveal removed the eased scroll and its AnimationTarget bookkeeping.
+    assert.doesNotMatch(tuneSource, /SCROLL_ANIMATE_MS|animateListScroll|ensureFocusVisible/);
+  });
+
+  test("focus uses the browser's native reveal: plain focus(), no preventScroll, no smooth scroll", () => {
+    const applyStart = renderSource.indexOf("applyFocusState() {");
+    assert.ok(applyStart >= 0, "applyFocusState exists");
+    const applyEnd = renderSource.indexOf("focusedNode() {", applyStart);
+    assert.ok(applyEnd > applyStart, "focusedNode follows applyFocusState");
+    const applyPath = renderSource.slice(applyStart, applyEnd);
+    assert.match(applyPath, /target\.focus\(\)/, "native focus() with default scrolling");
+    assert.doesNotMatch(applyPath, /preventScroll|focusWithoutAutoScroll|scrollIntoView/);
+    assert.doesNotMatch(renderSource + tuneSource, /behavior:\s*["']smooth["']/);
   });
 });

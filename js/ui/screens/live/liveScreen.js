@@ -2,7 +2,6 @@ import { Router } from "../../navigation/routerState.js";
 import { ScreenUtils } from "../../navigation/screen.js";
 import { Environment } from "../../../platform/environment.js";
 import { I18n } from "../../../i18n/index.js";
-import { focusWithoutAutoScroll } from "../../components/sidebarNavigation.js";
 import { renderLoadingIndicator } from "../../components/loadingIndicator.js";
 import { liveRepository } from "../../../data/repository/liveRepository.js";
 
@@ -14,7 +13,6 @@ export {
   Router,
   ScreenUtils,
   Environment,
-  focusWithoutAutoScroll,
   renderLoadingIndicator,
   liveRepository,
   isBackEvent,
@@ -60,8 +58,7 @@ export {
   readFavoriteIds,
   writeFavoriteIds,
   toggleFavoriteId,
-  clampIndex,
-  shouldAcceptRepeatMove
+  clampIndex
 } from "./liveScreenMethods-02-render.js";
 
 function isBackEvent(event) {
