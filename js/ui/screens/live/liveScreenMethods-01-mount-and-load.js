@@ -1,12 +1,22 @@
 /* eslint-disable no-unused-vars */
 import * as internals from "./liveScreen.js";
 
-// Mount and data loading. The screen renders its skeleton immediately, then
-// paints the chips row and the first source group's channels as soon as they
-// arrive, while the remaining categories preload in the background without
-// ever blocking input. Every repository call is abortable through a token +
-// controller pair so leaving the screen or switching categories cancels the
-// pending work.
+function clampRowIndexValue(index, length) {
+  const max = Math.max(0, (Array.isArray(length) ? length.length : Number(length) || 0) - 1);
+  const value = Number(index);
+  if (!Number.isInteger(value)) return 0;
+  return Math.min(max, Math.max(0, value));
+}
+
+// Mount and data loading for the reference layout: the screen renders its
+// skeleton immediately, then paints the left rail and the first category's
+// channels as soon as they arrive, while the remaining categories preload in
+// the background without ever blocking input. Per-category COUNTS in the rail
+// are read from those same cached lists — never from extra portal calls; a
+// pending category renders "…" until its background load lands.
+//
+// Every repository call is abortable through a token + controller pair so
+// leaving the screen or switching categories cancels the pending work.
 export function createLiveScreenMethods01() {
   const { Router, ScreenUtils, liveRepository } = internals;
 
@@ -31,7 +41,7 @@ export function createLiveScreenMethods01() {
       this.categories = [];
       this.categoriesLoading = true;
       this.categoriesError = "";
-      this.selectedColumnId = null;
+      this.railSelection = null; // railId of the selected channel source
       this.channelsByColumn = this.channelsByColumn || new Map();
       this.channels = [];
       this.channelsLoading = false;
@@ -42,24 +52,27 @@ export function createLiveScreenMethods01() {
       this.categoryLoadController = null;
       this.resolveController = null;
       this.noticeTimer = 0;
+      this.heroChannel = null; // hidden until a channel row is focused
 
-      // Deterministic focus state: which zone (header pills / chips row /
-      // channel list) plus explicit indices. Never derived from geometry.
-      this.focusZone = "chips";
-      this.headerIndex = 0;
-      this.chipIndex = 0;
+      // Deterministic focus state: which zone (hero actions / left rail /
+      // channel rows) plus explicit indices. Never derived from geometry.
+      this.focusZone = "rail";
+      this.heroIndex = 0;
+      this.railIndex = 0;
       this.rowIndex = 0;
       this.rowFocusTarget = "row"; // "row" | "star"
-      this.activeChipId = internals.ALL_CHIP_ID;
 
-      // Search state: a real <input> is mounted over the pill while active.
+      // Search state: a real <input> is mounted over the rail's search row
+      // while active; the left column dims but stays focusable.
       this.searchActive = false;
       this.searchQuery = "";
 
-      // Favourites: persisted under one namespaced key, keyed by the stable
-      // channel id. Loaded once per mount; every toggle writes through.
+      // Favourites and recently watched: persisted under namespaced keys.
+      // Favourites store stable ids; recents store lightweight snapshots so
+      // their rows render even before any per-category cache is warm.
       this.favoriteIds = internals.readFavoriteIds();
       this.favoriteSet = new Set(this.favoriteIds);
+      this.recentChannels = internals.readRecentChannels();
 
       this.render({ preserveFocus: false });
 
@@ -80,16 +93,15 @@ export function createLiveScreenMethods01() {
         return;
       }
       this.categories = Array.isArray(categories.data) ? categories.data : [];
-      if (this.categories.length) {
-        // "Todos" maps to the first source group: render it immediately and
-        // load its channels in the foreground; everything else preloads in
-        // the background so search and favourites see data as it arrives.
-        this.selectedColumnId = this.categories[0]?.columnId ?? null;
-        this.channelsLoading = true;
-      }
       this.render();
-      if (this.selectedColumnId != null) {
-        void this.loadChannelsForCategory(this.selectedColumnId, { background: false });
+      if (this.categories.length) {
+        // The first category shows its channels immediately (foreground load);
+        // everything else preloads in the background so the rail counts,
+        // search, favourites and recents see data as it arrives.
+        const first = this.railItems().find((item) => item.type === "category");
+        if (first) {
+          this.selectRailItem(first.railId, { enterRows: false });
+        }
         void this.preloadRemainingCategories(token);
       }
     },
@@ -101,9 +113,10 @@ export function createLiveScreenMethods01() {
       }
       const cached = this.channelsByColumn.get(key);
       if (cached) {
-        if (!background) {
+        if (!background && String(this.railSelection) === internals.categoryRailId(key)) {
           this.channelsLoading = false;
           this.channelsError = "";
+          this.channels = cached;
           this.refreshVisibleChannels();
         }
         return;
@@ -132,8 +145,9 @@ export function createLiveScreenMethods01() {
         this.channelsByColumn.set(key, result.data);
       }
       if (background) {
-        // Background preloads warm the cache for search and favourites; when
-        // the visible list can grow from the new data, refresh it quietly.
+        // Background preloads warm the cache for the rail counts, search,
+        // favourites and recents; when the visible list can grow from the new
+        // data, refresh it quietly.
         if (result.status === "success" && this.listDependsOnAllCaches()) {
           this.refreshVisibleChannels();
         }
@@ -156,52 +170,114 @@ export function createLiveScreenMethods01() {
       this.refreshVisibleChannels();
     },
 
-    // The visible list reads from the union of cached per-category lists when
-    // a favourites chip is active or a search query is being filtered; a
-    // single category otherwise. Background loads then refresh the visible
-    // list as new caches arrive.
+    // True when the visible list reads from the UNION of the cached
+    // per-category lists (search, favourites, all) rather than one category,
+    // so a background cache arrival must refresh the visible rows and the
+    // rail counts.
     listDependsOnAllCaches() {
       if (this.searchActive && this.searchQuery) {
         return true;
       }
-      return String(this.activeChipId) === internals.FAVORITES_CHIP_ID;
+      const selection = String(this.railSelection ?? "");
+      return selection === internals.RAIL_ALL_ID || selection === internals.RAIL_FAVORITES_ID;
     },
 
-    // Recomputes this.channels from the current chip/search state without
-    // touching the network. Used for chip switches, search updates, favourite
-    // changes and cache warm-ups.
+    // Recomputes this.channels from the current rail selection / search state
+    // without touching the network. Used for rail switches, search updates,
+    // favourite changes and cache warm-ups.
     refreshVisibleChannels() {
-      if (this.listDependsOnAllCaches()) {
+      const query = this.searchActive ? String(this.searchQuery || "").trim() : "";
+      const caches = this.channelsByColumn instanceof Map ? this.channelsByColumn : new Map();
+      if (query) {
+        // Search filters the LOADED channels: the deduplicated union of every
+        // cached per-category list.
         const union = new Map();
-        for (const list of this.channelsByColumn.values()) {
+        for (const list of caches.values()) {
           for (const channel of Array.isArray(list) ? list : []) {
             if (!union.has(String(channel?.id))) union.set(String(channel?.id), channel);
           }
         }
-        let all = Array.from(union.values());
-        if (this.searchActive && this.searchQuery) {
-          all = all.filter((channel) => internals.channelMatchesQuery(channel, this.searchQuery));
+        this.channels = Array.from(union.values()).filter((channel) => internals.channelMatchesQuery(channel, this.searchQuery));
+      } else {
+        const selection = String(this.railSelection ?? "");
+        if (selection === internals.RAIL_ALL_ID) {
+          const union = new Map();
+          for (const list of caches.values()) {
+            for (const channel of Array.isArray(list) ? list : []) {
+              if (!union.has(String(channel?.id))) union.set(String(channel?.id), channel);
+            }
+          }
+          this.channels = Array.from(union.values());
+        } else if (selection === internals.RAIL_FAVORITES_ID) {
+          const union = new Map();
+          for (const list of caches.values()) {
+            for (const channel of Array.isArray(list) ? list : []) {
+              if (!union.has(String(channel?.id))) union.set(String(channel?.id), channel);
+            }
+          }
+          // Favourite order wins: ids first, then rows the caches can resolve.
+          this.channels = this.favoriteIds.map((id) => union.get(String(id))).filter(Boolean);
+        } else if (selection === internals.RAIL_RECENTS_ID) {
+          this.channels = Array.isArray(this.recentChannels) ? [...this.recentChannels] : [];
+        } else if (selection && selection.startsWith("cat:")) {
+          const columnId = selection.slice(4);
+          const cached = caches.get(columnId);
+          this.channels = Array.isArray(cached) ? cached : [];
+          this.channelsError = "";
         }
-        if (String(this.activeChipId) === internals.FAVORITES_CHIP_ID && !(this.searchActive && this.searchQuery)) {
-          all = all.filter((channel) => this.favoriteSet.has(String(channel?.id)));
-        }
-        this.channels = all;
-        this.channelsLoading = false;
-        this.channelsError = "";
-        this.clampRowIndex();
-        this.render();
+      }
+      this.channelsLoading = false;
+      this.clampRowIndex();
+      // While searching, the hero follows the highlighted matching row (the
+      // input holds real focus, so row focus can never drive it).
+      if (this.searchActive && query && Array.isArray(this.channels) && this.channels.length) {
+        this.heroChannel = this.channels[clampRowIndexValue(this.rowIndex, this.channels.length)];
+      }
+      this.updateRowsOnly?.();
+    },
+
+    // Selects a rail row: sets the visible channel source on the right and,
+    // unless `enterRows: false`, moves focus into the rows (RIGHT from the
+    // rail, or Enter on a selectable row). Search opens the input; a source
+    // header toggles instead. Returns nothing; focus is applied here.
+    selectRailItem(railId, { enterRows = true } = {}) {
+      const items = this.railItems();
+      const item = items.find((entry) => entry.railId === String(railId ?? ""));
+      if (!item) return;
+      if (item.type === "search") {
+        this.openSearch?.();
         return;
       }
-      // Single-category chips (including "Todos" -> first source group).
+      if (item.type === "source") {
+        this.toggleSource?.(item);
+        return;
+      }
+      this.railSelection = item.railId;
+      if (item.type === "category") {
+        void this.loadChannelsForCategory(item.columnId, { background: false });
+      } else {
+        // favorites / recents / all: pure cache recompute, no network.
+        this.refreshVisibleChannels();
+      }
       this.clampRowIndex();
-      this.render();
+      if (enterRows) {
+        this.focusZone = "rows";
+        this.rowIndex = 0;
+        this.rowFocusTarget = "row";
+      } else {
+        this.focusZone = "rail";
+        const index = this.railItems().findIndex((entry) => entry.railId === item.railId);
+        this.railIndex = internals.clampIndex(index, this.railItems().length);
+      }
+      this.applyFocusState?.({ smooth: true });
     },
 
     // Sequential background preload: the portal measures ~150 ms per call and
     // 2 calls per category, so one category at a time keeps the pace gentle
-    // while making later category switches instant from cache.
+    // while making later category switches instant from cache and filling the
+    // rail's per-category counts.
     async preloadRemainingCategories(token) {
-      for (const category of this.categories.slice(1)) {
+      for (const category of this.categories || []) {
         if (token !== this.loadToken || Router.getCurrent() !== "live") {
           return;
         }
@@ -215,13 +291,11 @@ export function createLiveScreenMethods01() {
         }
         if (result.status === "success" && !this.channelsByColumn.has(String(columnId))) {
           this.channelsByColumn.set(String(columnId), result.data);
-          if (String(columnId) === String(this.selectedColumnId)) {
-            this.channelsLoading = false;
-            this.channelsError = "";
-            this.channels = result.data;
-            this.render();
-          } else if (this.listDependsOnAllCaches()) {
+          if (this.listDependsOnAllCaches()) {
             this.refreshVisibleChannels();
+          } else {
+            // Only the rail counts changed ("…" -> numbers).
+            this.updateRowsOnly?.();
           }
         }
       }
@@ -239,30 +313,13 @@ export function createLiveScreenMethods01() {
       this.favoriteIds = internals.toggleFavoriteId(this.favoriteIds, id);
       this.favoriteSet = new Set(this.favoriteIds);
       internals.writeFavoriteIds(this.favoriteIds);
-      if (String(this.activeChipId) === internals.FAVORITES_CHIP_ID) {
+      if (String(this.railSelection) === internals.RAIL_FAVORITES_ID && !this.searchActive) {
         // The favourited row may have just left (or entered) the visible list.
         this.refreshVisibleChannels();
       } else {
         this.updateRowsOnly();
       }
       return this.favoriteSet.has(id);
-    },
-
-    // Header source line: the merged sources actually backing the catalogue.
-    sourceLabels() {
-      const labels = [];
-      for (const category of this.categories || []) {
-        const label = internals.sourceNameFromColumnId(category?.columnId);
-        if (label && !labels.includes(label)) labels.push(label);
-      }
-      if (!labels.length) {
-        // Categories failed to load but channels may still be cached.
-        for (const channel of this.channels || []) {
-          const label = internals.sourceNameFromChannelId(channel?.id);
-          if (label && !labels.includes(label)) labels.push(label);
-        }
-      }
-      return labels;
     },
 
     clampRowIndex() {
@@ -282,6 +339,7 @@ export function createLiveScreenMethods01() {
       this.clearNoticeTimer();
       this.notice = "";
       this.tuningChannelId = "";
+      this.heroChannel = null;
       ScreenUtils.hide(this.container);
     }
   };

@@ -1,25 +1,34 @@
 /* eslint-disable no-unused-vars */
 import * as internals from "./liveScreen.js";
 
-// Rendering for the Live TV screen, following the mobile app's Live TV
-// structure (apps/nuvio-mobile .../livetv/ui/LiveTvScreen.kt): ONE vertical
-// list of collapsible groups. Each group is a header card (`Magis · Deportes`,
-// channel count, chevron) and its channels render indented underneath when
-// expanded. A `Favoritos` group sits first (only when it has channels); there
-// is no `Todos` group, no categories rail and no preview panel: the list takes
-// the full body width. With search active the list shows flat matching rows,
-// exactly like the mobile search results.
+// Rendering for the Live TV screen, following the REAL Android TV reference
+// (nuvio-plus-sports beta.8.4): a HERO panel on top (channel identity + a 16:9
+// box + search/guide actions) and, below it, a LEFT VERTICAL RAIL of grouped
+// categories next to the channel rows.
 //
-// Focus is tracked as plain state on the screen (focusZone / flatIndex /
-// rowFocusTarget) over the FLAT item order (group headers and rows
-// interleaved), never by geometry. Movement must be fluid: a focus change only
-// toggles classes (no re-render), scrolling is the smallest movement animated
-// over ~110ms, and key repeats faster than the animation are coalesced.
+// The rail reads, top to bottom: Buscar (search), Favoritos (always),
+// Vistos recientemente (only when non-empty), Todos los canales (merged
+// total), then ONE collapsible section per SOURCE (MAGIS / PREMIUMTV) with the
+// source's own count and its indented category rows (name left, count right).
+// Category counts come from the per-category channel lists the screen already
+// loads — never from extra portal calls; a pending list renders "…" and its
+// source's count stays "…" until every one of its categories is cached.
 //
-// The styles are inlined here because the screen ships without a dedicated
-// stylesheet. Palette and sizes are measured from the 1280x720 reference and
-// scaled x1.5 for the 1920x1080 surface: page #0E0E12, cards #111111,
-// muted #9CA3AF, rows ~126px tall, logos 66px.
+// We have no EPG: the hero shows the source name where the reference shows the
+// time range, the muted line "Sin información de programa", and NO progress
+// bar. The 16:9 preview box keeps the channel logo centred — never a fake
+// thumbnail.
+//
+// Focus is deterministic state (focusZone + railIndex / rowIndex /
+// rowFocusTarget + heroIndex), never geometry. Movement must be fluid: a focus
+// change only toggles classes (no re-render), scrolling is the smallest
+// movement animated over ~110ms, and key repeats faster than the cadence are
+// coalesced.
+//
+// Styles are inlined because the screen ships without a dedicated stylesheet.
+// Palette from the 960x540 reference scaled x2 for the 1920x1080 surface:
+// page #0E0E12, cards #111111, muted #9CA3AF, accent #F5C400, white outline
+// on the focused row.
 
 // Pure helpers -------------------------------------------------------------
 
@@ -41,14 +50,6 @@ export function sourceNameFromColumnId(columnId) {
   return "Magis";
 }
 
-// Group label: `Source · Category` so two portals with same-named categories
-// stay distinguishable, exactly like the reference (`TV · Deportes` style).
-export function formatChipLabel(category) {
-  const name = String(category?.name ?? "").trim() || "Unnamed";
-  const source = sourceNameFromColumnId(category?.columnId);
-  return source ? `${source} · ${name}` : name;
-}
-
 // Row first line: the number is rendered dimmed and separate from the bold
 // name; a missing number renders as an empty string (no fake "0").
 export function formatChannelRowLabel(channel) {
@@ -60,8 +61,8 @@ export function formatChannelRowLabel(channel) {
   };
 }
 
-// Logo resolution for thumbnails and the preview box: whitespace-only urls
-// count as missing so the letter fallback shows instead of a broken image.
+// Logo resolution for thumbnails and the hero preview box: whitespace-only
+// urls count as missing so the letter fallback shows instead of a broken image.
 export function channelLogoInfo(channel) {
   const logo = String(channel?.logo ?? "").trim();
   const name = String(channel?.name ?? "").trim();
@@ -121,79 +122,178 @@ export function toggleFavoriteId(ids, channelId) {
   return current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id];
 }
 
-// Group model --------------------------------------------------------------
+// Recently watched ----------------------------------------------------------
+// The last tuned channels, persisted under one namespaced key as lightweight
+// snapshots (id + name + logo + number) so the rows render even before any
+// per-category cache is warm. Same storage idea as favourites.
 
-// Special group ids. `__all__` no longer renders as a group ("Todos" was
-// removed with the grouped layout) but the constant stays exported because the
-// mount/load module and cached state still reference it. `__favorites__` is
-// the id of the favorites group card.
-export const ALL_CHIP_ID = "__all__";
-export const FAVORITES_CHIP_ID = "__favorites__";
+export const RECENTS_STORAGE_KEY = "nuvio.live.recents.v1";
+export const MAX_RECENT_CHANNELS = 12;
 
-// Pure group sections for the list: the favorites group first (only when it
-// has channels), then one section per portal category with the source
-// prefixed in the label. A category whose channels are not cached yet renders
-// as a loading section (count: null, channels: []). No `Todos` section exists.
-export function buildGroupSections({
-  categories = [],
-  channelsByColumn = new Map(),
-  favoriteChannels = [],
-  favoritesLabel = "Favoritos"
-} = {}) {
-  const sections = [];
-  const favorites = Array.isArray(favoriteChannels) ? favoriteChannels : [];
-  if (favorites.length) {
-    sections.push({
-      groupId: FAVORITES_CHIP_ID,
-      label: String(favoritesLabel || "Favoritos"),
-      count: favorites.length,
-      channels: favorites,
-      loading: false
-    });
+// Pure: returns a NEW list with the channel's snapshot first, deduped by the
+// stable channel id and capped at MAX_RECENT_CHANNELS.
+export function pushRecentChannel(recents, channel) {
+  const id = String(channel?.id ?? "").trim();
+  if (!id) return Array.isArray(recents) ? [...recents] : [];
+  const snapshot = {
+    id,
+    name: String(channel?.name ?? "").trim() || "Canal en vivo",
+    logo: String(channel?.logo ?? "").trim(),
+    number: channel?.number ?? null
+  };
+  const current = Array.isArray(recents) ? recents : [];
+  const rest = current.filter((entry) => String(entry?.id ?? "") !== id);
+  return [snapshot, ...rest].slice(0, MAX_RECENT_CHANNELS);
+}
+
+export function readRecentChannels(storage) {
+  const store = storage ?? globalThis?.localStorage ?? null;
+  try {
+    const raw = store?.getItem?.(RECENTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((entry) => entry && String(entry?.id ?? "").trim())
+      .map((entry) => ({
+        id: String(entry.id),
+        name: String(entry?.name ?? "").trim() || "Canal en vivo",
+        logo: String(entry?.logo ?? "").trim(),
+        number: entry?.number ?? null
+      }))
+      .slice(0, MAX_RECENT_CHANNELS);
+  } catch (_) {
+    return [];
   }
+}
+
+export function writeRecentChannels(recents, storage) {
+  const store = storage ?? globalThis?.localStorage ?? null;
+  try {
+    const safe = Array.isArray(recents) ? recents.slice(0, MAX_RECENT_CHANNELS) : [];
+    store?.setItem?.(RECENTS_STORAGE_KEY, JSON.stringify(safe));
+  } catch (_) {
+    // Persistence is best effort; the in-memory list keeps working this session.
+  }
+}
+
+// Rail model ---------------------------------------------------------------
+
+// Stable rail ids for the fixed rows and per-item channel sources. Category
+// rows and source headers derive their ids from the portal data.
+export const RAIL_SEARCH_ID = "__search__";
+export const RAIL_FAVORITES_ID = "__favorites__";
+export const RAIL_RECENTS_ID = "__recents__";
+export const RAIL_ALL_ID = "__all__";
+
+export function categoryRailId(columnId) {
+  return `cat:${String(columnId ?? "")}`;
+}
+
+export function sourceRailIdFromColumnId(columnId) {
+  return `source:${sourceNameFromColumnId(columnId)}`;
+}
+
+// Collapsed source sections persist in memory across screen visits (module-
+// level singleton). Sources are EXPANDED by default, so this set remembers the
+// collapsed ones — a fresh source appears expanded without extra state.
+const collapsedSourceIds = new Set();
+
+// Accessor shared with the key-handling module (one owner: this module).
+export function collapsedSourceIdsRef() {
+  return collapsedSourceIds;
+}
+
+export function isSourceExpanded(sourceRailId, collapsedIds) {
+  const set = collapsedIds instanceof Set ? collapsedIds : collapsedSourceIds;
+  return !set.has(String(sourceRailId ?? ""));
+}
+
+// Pure toggle (mutates the shared set in place, like the focus model does).
+export function toggleSourceCollapsed(collapsedIds, sourceRailId) {
+  const id = String(sourceRailId ?? "");
+  if (!id) return;
+  const set = collapsedIds instanceof Set ? collapsedIds : collapsedSourceIds;
+  if (set.has(id)) set.delete(id);
+  else set.add(id);
+}
+
+// The flat focus order of the LEFT RAIL for the current state:
+//   [search] [favorites] [recents?] [all] [source header, its categories]...
+// Counts are read from the per-category caches ONLY (no extra portal calls):
+// a category with no cached list yet is `loading: true` with count `null`,
+// and its source's count stays `null` ("…") until every one of its
+// categories is cached.
+export function buildRailItems({ categories = [], channelsByColumn = new Map(), favoriteCount = 0, recentCount = 0 } = {}) {
+  const caches = channelsByColumn instanceof Map ? channelsByColumn : new Map();
+  const items = [
+    { type: "search", railId: RAIL_SEARCH_ID, label: "Buscar", count: null },
+    { type: "favorites", railId: RAIL_FAVORITES_ID, label: "Favoritos", count: Math.max(0, Number(favoriteCount) || 0) }
+  ];
+  const recents = Math.max(0, Number(recentCount) || 0);
+  if (recents > 0) {
+    items.push({ type: "recents", railId: RAIL_RECENTS_ID, label: "Vistos recientemente", count: recents });
+  }
+
+  // Todos los canales: the deduplicated union of every cached list.
+  const union = new Map();
+  for (const list of caches.values()) {
+    for (const channel of Array.isArray(list) ? list : []) {
+      if (!union.has(String(channel?.id))) union.set(String(channel?.id), channel);
+    }
+  }
+  items.push({
+    type: "all",
+    railId: RAIL_ALL_ID,
+    label: "Todos los canales",
+    count: union.size > 0 ? union.size : null
+  });
+
+  // ONE section per source, in first-appearance order over the merged
+  // categories; each keeps its own category rows in feed order.
+  const sources = [];
+  const bySource = new Map();
   for (const category of Array.isArray(categories) ? categories : []) {
-    const columnId = String(category?.columnId ?? "");
+    const columnId = String(category?.columnId ?? "").trim();
     if (!columnId) continue;
-    const cached = channelsByColumn instanceof Map ? channelsByColumn.get(columnId) : null;
+    const source = sourceNameFromColumnId(columnId);
+    if (!source) continue;
+    const sourceRailId = `source:${source}`;
+    let section = bySource.get(sourceRailId);
+    if (!section) {
+      section = { type: "source", railId: sourceRailId, label: source, categories: [] };
+      bySource.set(sourceRailId, section);
+      sources.push(section);
+    }
+    const cached = caches.get(columnId);
     const channels = Array.isArray(cached) ? cached : [];
-    sections.push({
-      groupId: columnId,
-      label: formatChipLabel(category),
+    section.categories.push({
+      type: "category",
+      railId: categoryRailId(columnId),
+      columnId,
+      label: String(category?.name ?? "").trim() || "Sin nombre",
       count: cached ? channels.length : null,
-      channels,
       loading: !cached
     });
   }
-  return sections;
-}
-
-// Pure flat focus order: one item per group header card, followed by the
-// group's rows when (and only when) the group is expanded. The focused index
-// lives in this flat space, so headers and rows are reachable with UP/DOWN
-// exactly like the mobile list.
-export function flattenSections(sections, expandedIds) {
-  const items = [];
-  for (const section of Array.isArray(sections) ? sections : []) {
-    if (!section || !section.groupId) continue;
-    items.push({
-      type: "group",
-      groupId: String(section.groupId),
-      label: section.label,
-      count: section.count,
-      loading: Boolean(section.loading),
-      channels: Array.isArray(section.channels) ? section.channels : []
-    });
-    const expanded = expandedIds instanceof Set ? expandedIds.has(String(section.groupId)) : false;
-    if (expanded) {
-      for (const channel of Array.isArray(section.channels) ? section.channels : []) {
-        items.push({ type: "channel", groupId: String(section.groupId), channel });
+  for (const section of sources) {
+    const allCached = section.categories.every((category) => !category.loading);
+    section.count = allCached ? section.categories.reduce((sum, category) => sum + (category.count ?? 0), 0) : null;
+    section.expanded = isSourceExpanded(section.railId);
+    section.loading = !allCached;
+    items.push(section);
+    if (section.expanded) {
+      // The flat focus order interleaves each header with its own rows, so a
+      // collapsed section contributes NO focusable category items.
+      for (const category of section.categories) {
+        items.push({ ...category, sourceRailId: section.railId });
       }
     }
   }
   return items;
 }
 
-// Clamp a flat index into [0, length - 1]; garbage input and empty lists
+// Clamp an index into [0, length - 1]; garbage input and empty lists
 // collapse to 0 so focus can never land outside the list.
 export function clampIndex(index, length) {
   const max = Math.max(0, Number(length) - 1);
@@ -215,16 +315,6 @@ export function shouldAcceptRepeatMove(lastMoveAt, now, cadenceMs) {
 
 // Rendering ----------------------------------------------------------------
 
-// Expanded group ids persist in memory across screen visits (module-level
-// singleton, like the mobile app's LiveTvListMemory.expanded). Groups start
-// collapsed.
-const expandedGroupIds = new Set();
-
-// Accessor shared with the key-handling module (one owner: this module).
-export function expandedGroupIdsRef() {
-  return expandedGroupIds;
-}
-
 export function createLiveScreenMethods02() {
   const { ScreenUtils, renderLoadingIndicator, escapeHtml, t, Router } = internals;
 
@@ -235,32 +325,52 @@ export function createLiveScreenMethods02() {
          its content: min-height:0 / min-width:0 everywhere it matters. Without
          them the panel grows with the content, the ancestor clips it, and the
          focused row walks off-screen while scrollTop stays 0. */
-      .live-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 28px 40px 8px; box-sizing: border-box; }
-      .live-header-left { min-width: 0; }
-      .live-title { font-size: 42px; font-weight: 700; margin: 0; line-height: 1.15; }
-      .live-header-sub { font-size: 20px; color: #9CA3AF; margin-top: 6px; }
-      .live-header-actions { display: flex; gap: 16px; flex-shrink: 0; }
-      .live-pill { display: inline-flex; align-items: center; gap: 10px; background: rgba(255,255,255,0.08); border: 0; border-radius: 999px; color: #9CA3AF; font-size: 22px; padding: 18px 30px; outline: none; cursor: pointer; box-sizing: border-box; }
-      .live-pill.focused { outline: 3px solid var(--secondary-color, #f5f5f5); outline-offset: 2px; background: rgba(255,255,255,0.16); color: #ffffff; }
-      /* The search input sits exactly over its pill: a real <input> so the TV
-         system IME can attach to it, styled invisible as a chrome-less field. */
-      .live-search-pill { position: relative; min-width: 320px; }
-      .live-search-input { position: absolute; inset: 0; width: 100%; height: 100%; background: transparent; border: 0; outline: none; color: #f5f5f5; font-size: 22px; padding: 0 30px; box-sizing: border-box; }
-      /* ONE full-width list: group header cards with their rows indented
-         underneath when expanded. No categories rail, no preview panel. */
-      .live-body { flex: 1; min-height: 0; display: flex; padding: 8px 40px 28px; box-sizing: border-box; }
+      /* HERO ---------------------------------------------------------------- */
+      .live-hero { flex-shrink: 0; display: flex; align-items: stretch; gap: 24px; margin: 20px 40px 16px; background: #111111; border-radius: 20px; padding: 20px 24px; box-sizing: border-box; min-height: 240px; position: relative; }
+      .live-hero.is-hidden { display: none; }
+      .live-hero-main { display: flex; align-items: center; gap: 24px; flex: 1; min-width: 0; }
+      .live-hero-logo { position: relative; width: 108px; height: 108px; border-radius: 16px; background: rgba(0,0,0,0.4); overflow: hidden; flex-shrink: 0; }
+      .live-hero-logo-initial { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 44px; font-weight: 700; color: #9CA3AF; }
+      .live-hero-logo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+      .live-hero-logo img.is-broken { display: none; }
+      .live-hero-meta { flex: 1; min-width: 0; }
+      .live-hero-topline { display: flex; align-items: center; gap: 16px; }
+      .live-hero-number { font-size: 26px; font-weight: 700; color: #9CA3AF; }
+      .live-hero-badge { display: inline-block; background: #e11d2e; color: #ffffff; border-radius: 6px; font-size: 18px; font-weight: 700; letter-spacing: 1px; padding: 4px 12px; }
+      .live-hero-name { font-size: 44px; font-weight: 700; line-height: 1.15; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .live-hero-source { font-size: 22px; color: #9CA3AF; margin-top: 10px; }
+      .live-hero-noprogram { font-size: 20px; color: #9CA3AF; margin-top: 6px; }
+      .live-hero-actions { position: absolute; top: 16px; right: 20px; display: flex; gap: 14px; }
+      .live-pill { display: inline-flex; align-items: center; gap: 10px; background: rgba(255,255,255,0.08); border: 0; border-radius: 999px; color: #9CA3AF; font-size: 20px; padding: 12px 24px; outline: none; cursor: pointer; box-sizing: border-box; }
+      .live-pill.focused { outline: 3px solid var(--secondary-color, #ffffff); outline-offset: 2px; background: rgba(255,255,255,0.16); color: #ffffff; }
+      /* 16:9 preview box: the logo sits centred. We have no frame source, so
+         no fake thumbnail is ever drawn. */
+      .live-hero-preview { flex-shrink: 0; width: 426px; height: 240px; border-radius: 14px; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+      .live-hero-preview img { max-width: 70%; max-height: 70%; object-fit: contain; }
+      .live-hero-preview img.is-broken { display: none; }
+      .live-hero-preview-initial { font-size: 64px; font-weight: 700; color: #55555c; }
+      /* BODY: narrow LEFT RAIL + channel rows on the right ------------------- */
+      .live-body { flex: 1; min-height: 0; display: flex; gap: 20px; padding: 0 40px 24px; box-sizing: border-box; }
+      .live-rail { flex: 0 0 21%; min-width: 0; min-height: 0; overflow-y: auto; scroll-behavior: auto; display: flex; flex-direction: column; gap: 8px; box-sizing: border-box; transition: opacity 120ms ease; }
+      .live-rail.is-dimmed { opacity: 0.45; }
+      .live-rail-row { flex-shrink: 0; display: flex; align-items: center; gap: 14px; min-height: 84px; background: #111111; border-radius: 14px; padding: 12px 20px; outline: 3px solid transparent; outline-offset: -3px; cursor: pointer; box-sizing: border-box; transition: background-color 90ms ease, outline-color 90ms ease; }
+      .live-rail-row.focused { outline-color: #ffffff; background: #1b1b22; }
+      .live-rail-search { position: relative; }
+      .live-rail-icon { flex-shrink: 0; font-size: 26px; color: #9CA3AF; }
+      .live-rail-label { flex: 1; min-width: 0; font-size: 24px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .live-rail-count { flex-shrink: 0; font-size: 20px; color: #9CA3AF; }
+      .live-rail-row.focused .live-rail-count { color: #d1d5db; }
+      /* The search input sits exactly over its rail row: a real <input> so the
+         TV system IME can attach to it, styled invisible as a chrome-less field. */
+      .live-search-input { position: absolute; inset: 0; width: 100%; height: 100%; background: transparent; border: 0; outline: none; color: #f5f5f5; font-size: 22px; padding: 0 20px 0 62px; box-sizing: border-box; }
+      .live-source-header { border-radius: 14px; }
+      .live-source-chevron { flex-shrink: 0; width: 26px; font-size: 24px; color: #9CA3AF; transition: transform 120ms ease; }
+      .live-rail-category { margin-left: 26px; min-height: 72px; }
+      .live-rail-category .live-rail-label { font-weight: 500; font-size: 22px; color: #d1d5db; }
+      /* CHANNEL ROWS (right side) ------------------------------------------- */
       .live-channel-list { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; scroll-behavior: auto; display: flex; flex-direction: column; gap: 12px; box-sizing: border-box; }
-      .live-group-header { flex-shrink: 0; display: flex; align-items: center; gap: 16px; min-height: 96px; background: #111111; border-radius: 16px; padding: 14px 24px; outline: none; cursor: pointer; box-sizing: border-box; transition: background-color 90ms ease, color 90ms ease; }
-      .live-group-header.focused { background: #E8E8E8; color: #0E0E12; }
-      .live-group-chevron { flex-shrink: 0; font-size: 26px; color: #9CA3AF; transition: transform 120ms ease; }
-      .live-group-chevron.is-expanded { transform: rotate(90deg); }
-      .live-group-header.focused .live-group-chevron { color: #55555c; }
-      .live-group-label { flex: 1; min-width: 0; font-size: 26px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .live-group-count { flex-shrink: 0; background: rgba(255,255,255,0.08); border-radius: 999px; color: #9CA3AF; font-size: 20px; padding: 8px 18px; }
-      .live-group-header.focused .live-group-count { color: #55555c; }
-      .live-group-rows { flex-shrink: 0; display: flex; flex-direction: column; gap: 12px; padding: 2px 0 6px 28px; box-sizing: border-box; }
-      .live-channel-row { flex-shrink: 0; display: flex; align-items: center; gap: 20px; min-height: 126px; background: #111111; border-radius: 16px; padding: 14px 20px; outline: none; cursor: pointer; box-sizing: border-box; transition: background-color 90ms ease, color 90ms ease; }
-      .live-channel-row.focused { background: #E8E8E8; color: #0E0E12; }
+      .live-channel-row { flex-shrink: 0; display: flex; align-items: center; gap: 20px; min-height: 126px; background: #111111; border-radius: 16px; padding: 14px 20px; outline: 3px solid transparent; outline-offset: -3px; cursor: pointer; box-sizing: border-box; transition: background-color 90ms ease, outline-color 90ms ease; }
+      .live-channel-row.focused { outline-color: #ffffff; background: #1b1b22; }
       .live-row-logo { position: relative; width: 66px; height: 66px; border-radius: 12px; background: rgba(0,0,0,0.4); overflow: hidden; flex-shrink: 0; }
       .live-row-logo-initial { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 700; color: #9CA3AF; }
       .live-row-logo img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
@@ -301,15 +411,20 @@ export function createLiveScreenMethods02() {
     }
   }
 
-  // See the exported ALL_CHIP_ID / FAVORITES_CHIP_ID constants above.
+  // "…" while a count is unknown; a known count renders as-is (0 included).
+  function countLabel(count) {
+    return count == null ? "…" : String(count);
+  }
+
   return {
     render({ preserveFocus = true } = {}) {
       try {
         const shellMarkup = `
           ${STYLE}
           <div class="live-shell">
-            ${this.renderHeader()}
+            ${this.renderHero()}
             <div class="live-body">
+              ${this.renderRail()}
               ${this.renderChannelList()}
             </div>
             ${this.notice ? `<div class="live-notice" role="status">${escapeHtml(this.notice)}</div>` : ""}
@@ -327,37 +442,33 @@ export function createLiveScreenMethods02() {
           }
         }
         this.applyFocusState({ smooth: false });
+        this.updateHeroForFocus({ force: true });
       } catch (error) {
         // A thrown exception during render used to blank the whole screen
-        // (no header pills, no focus targets, dead D-pad). Render a minimal
-        // shell that ALWAYS shows the header actions and report the error.
+        // (no hero actions, no focus targets, dead D-pad). Render a minimal
+        // shell that ALWAYS keeps a reachable focusable and report the error.
         reportLiveErrorSafe(error, "render");
         this.renderErrorFallback(error);
       }
     },
 
-    // Minimal shell used only when the normal render throws: the header pills
-    // are always present so the D-pad keeps a reachable target.
+    // Minimal shell used only when the normal render throws: the search row
+    // stays present so the D-pad keeps a reachable target.
     renderErrorFallback(error) {
       try {
         const detail = String(error?.message || "").slice(0, 160);
         this.container.innerHTML = `
           ${STYLE}
           <div class="live-shell">
-            <header class="live-header">
-              <div class="live-header-left">
-                <h1 class="live-title">Live TV</h1>
-                <div class="live-header-sub"></div>
-              </div>
-              <div class="live-header-actions">
-                <div class="live-pill live-search-pill focusable" data-action="openSearch" role="button">Buscar</div>
-                <button class="live-pill focusable" data-action="showGuide">Guía</button>
-              </div>
-            </header>
             <div class="live-body">
-              <div class="live-channel-list">
+              <div class="live-rail">
+                <div class="live-rail-row live-rail-search focusable" data-action="openSearch" data-rail-index="0" role="button">
+                  <span class="live-rail-icon" aria-hidden="true">⌕</span>
+                  <span class="live-rail-label">Buscar</span>
+                </div>
                 <div class="live-panel-error">${escapeHtml(detail || "Live TV render error")}</div>
               </div>
+              <div class="live-channel-list"></div>
             </div>
           </div>
         `;
@@ -368,49 +479,185 @@ export function createLiveScreenMethods02() {
       }
     },
 
-    // Header: big "<n> canales" title over every channel known so far (the
-    // union of all cached groups), one muted line with the merged sources,
-    // then the search and guide pills. The pills must ALWAYS render: they are
-    // guarded individually so one bad interpolation cannot drop them.
-    renderHeader() {
+    // HERO -------------------------------------------------------------------
+    // Hidden while nothing is selected; shows the focused/highlighted channel:
+    // logo box, `N` + red EN VIVO badge, the big name, the source name (where
+    // the reference shows its EPG time range) and the honest "no EPG" line.
+    renderHero() {
       try {
-        const categoriesLoading = Boolean(this.categoriesLoading);
-        const count = categoriesLoading ? 0 : this.unionCachedChannels().length;
-        const countLabel = categoriesLoading
-          ? t("live_channels_loading_short", {}, "Cargando...")
-          : t("live_header_count", { count }, `${count} canales`);
-        const sources = Array.isArray(this.sourceLabels?.()) ? this.sourceLabels().join(" · ") : "";
+        const channel = this.heroChannel || null;
+        const hidden = channel ? "" : " is-hidden";
+        const label = formatChannelRowLabel(channel || {});
+        const logo = channelLogoInfo(channel || {});
+        const source = channel ? sourceNameFromChannelId(channel?.id) || sourceNameFromColumnId(channel?.group) : "";
+        const number = label.number ? label.number.replace(/\.$/, "") : "";
         return `
-          <header class="live-header">
-            <div class="live-header-left">
-              <h1 class="live-title">${escapeHtml(countLabel)}</h1>
-              ${sources ? `<div class="live-header-sub">${escapeHtml(sources)}</div>` : ""}
-            </div>
-            <div class="live-header-actions">
-              <div class="live-pill live-search-pill focusable" data-action="openSearch" role="button" aria-label="${escapeHtml(t("live_search_open", {}, "Buscar canales"))}">
-                ${this.searchActive ? `<input class="live-search-input" type="text" placeholder="${escapeHtml(t("live_search_placeholder", {}, "Buscar canales"))}" value="${escapeHtml(this.searchQuery || "")}" />` : `<span class="live-search-placeholder">${escapeHtml(t("live_search_placeholder", {}, "Buscar canales"))}</span>`}
+          <section class="live-hero${hidden}" aria-hidden="${channel ? "false" : "true"}">
+            <div class="live-hero-main">
+              <div class="live-hero-logo">
+                <span class="live-hero-logo-initial" aria-hidden="true">${escapeHtml(logo.letter)}</span>
+                ${logo.logo ? `<img src="${escapeHtml(logo.logo)}" alt="" onerror="this.classList.add('is-broken')" />` : ""}
               </div>
-              <button class="live-pill live-guide-pill focusable" data-action="showGuide">${escapeHtml(t("live_guide_button", {}, "Guía"))}</button>
+              <div class="live-hero-meta">
+                <div class="live-hero-topline">
+                  ${number ? `<span class="live-hero-number" data-hero-field="number">${escapeHtml(number)}</span>` : `<span class="live-hero-number" data-hero-field="number"></span>`}
+                  <span class="live-hero-badge">EN VIVO</span>
+                </div>
+                <h1 class="live-hero-name" data-hero-field="name">${escapeHtml(label.name)}</h1>
+                <div class="live-hero-source" data-hero-field="source">${escapeHtml(source)}</div>
+                <div class="live-hero-noprogram">${escapeHtml(t("live_no_program_info", {}, "Sin información de programa"))}</div>
+              </div>
             </div>
-          </header>
+            <div class="live-hero-actions">
+              <div class="live-pill focusable" data-action="openSearch" role="button" aria-label="${escapeHtml(t("live_search_open", {}, "Buscar canales"))}">
+                <span aria-hidden="true">⌕</span><span>${escapeHtml(t("live_search_open", {}, "Buscar"))}</span>
+              </div>
+              <button class="live-pill focusable" data-action="showGuide">${escapeHtml(t("live_guide_button", {}, "Guía"))}</button>
+            </div>
+            <div class="live-hero-preview" aria-hidden="true">
+              ${logo.logo ? `<img src="${escapeHtml(logo.logo)}" alt="" onerror="this.classList.add('is-broken')" />` : `<span class="live-hero-preview-initial">${escapeHtml(logo.letter)}</span>`}
+            </div>
+          </section>
         `;
       } catch (error) {
-        reportLiveErrorSafe(error, "renderHeader");
-        return `
-          <header class="live-header">
-            <div class="live-header-left"><h1 class="live-title">Live TV</h1></div>
-            <div class="live-header-actions">
-              <div class="live-pill live-search-pill focusable" data-action="openSearch" role="button">Buscar</div>
-              <button class="live-pill focusable" data-action="showGuide">Guía</button>
-            </div>
-          </header>
-        `;
+        reportLiveErrorSafe(error, "renderHero");
+        return `<section class="live-hero is-hidden" aria-hidden="true"></section>`;
       }
     },
 
-    // The union of every cached per-group channel list, deduplicated by the
-    // stable channel id. One implementation shared by the header count, the
-    // favorites group and the visible-channels refresh.
+    // Patch the hero fields in place for a newly focused/highlighted channel.
+    // Never a re-render: focus movement must stay cheap.
+    updateHeroForFocus({ force = false } = {}) {
+      try {
+        const hero = this.container?.querySelector(".live-hero");
+        if (!hero) return;
+        const channel = this.heroChannel || null;
+        if (!channel) {
+          hero.classList.add("is-hidden");
+          hero.setAttribute("aria-hidden", "true");
+          return;
+        }
+        hero.classList.remove("is-hidden");
+        hero.setAttribute("aria-hidden", "false");
+        if (!force && String(hero.dataset.heroChannelId || "") === String(channel.id || "")) {
+          return; // same channel: nothing to patch
+        }
+        hero.dataset.heroChannelId = String(channel.id || "");
+        const label = formatChannelRowLabel(channel);
+        const logo = channelLogoInfo(channel);
+        const source = sourceNameFromChannelId(channel?.id) || sourceNameFromColumnId(channel?.group);
+        const number = label.number ? label.number.replace(/\.$/, "") : "";
+        const numberNode = hero.querySelector('[data-hero-field="number"]');
+        if (numberNode) numberNode.textContent = number;
+        const nameNode = hero.querySelector('[data-hero-field="name"]');
+        if (nameNode) nameNode.textContent = label.name;
+        const sourceNode = hero.querySelector('[data-hero-field="source"]');
+        if (sourceNode) sourceNode.textContent = source;
+        const logoBox = hero.querySelector(".live-hero-logo");
+        if (logoBox) {
+          logoBox.innerHTML = `
+            <span class="live-hero-logo-initial" aria-hidden="true">${escapeHtml(logo.letter)}</span>
+            ${logo.logo ? `<img src="${escapeHtml(logo.logo)}" alt="" onerror="this.classList.add('is-broken')" />` : ""}
+          `;
+        }
+        const preview = hero.querySelector(".live-hero-preview");
+        if (preview) {
+          preview.innerHTML = logo.logo
+            ? `<img src="${escapeHtml(logo.logo)}" alt="" onerror="this.classList.add('is-broken')" />`
+            : `<span class="live-hero-preview-initial">${escapeHtml(logo.letter)}</span>`;
+        }
+      } catch (error) {
+        reportLiveErrorSafe(error, "updateHeroForFocus");
+      }
+    },
+
+    // LEFT RAIL --------------------------------------------------------------
+    renderRail() {
+      try {
+        const items = this.railItems();
+        const dimmed = this.searchActive ? " is-dimmed" : "";
+        const rows = items
+          .map((item, index) => {
+            if (item.type === "search") {
+              return `
+                <div class="live-rail-row live-rail-search focusable"
+                     role="button"
+                     data-action="openSearch"
+                     data-rail-index="${index}">
+                  <span class="live-rail-icon" aria-hidden="true">⌕</span>
+                  <span class="live-rail-label">${escapeHtml(item.label)}</span>
+                  ${this.searchActive ? `<input class="live-search-input" type="text" aria-label="${escapeHtml(t("live_search_open", {}, "Buscar canales"))}" value="${escapeHtml(this.searchQuery || "")}" />` : ""}
+                </div>
+              `;
+            }
+            if (item.type === "source") {
+              const expanded = item.expanded !== false;
+              return `
+                <div class="live-rail-row live-source-header focusable"
+                     role="button"
+                     data-action="toggleSource"
+                     data-rail-id="${escapeHtml(item.railId)}"
+                     data-rail-index="${index}"
+                     aria-expanded="${expanded ? "true" : "false"}">
+                  <span class="live-source-chevron" aria-hidden="true">${expanded ? "▾" : "›"}</span>
+                  <span class="live-rail-label">${escapeHtml(item.label)}</span>
+                  <span class="live-rail-count">${escapeHtml(countLabel(item.count))}</span>
+                </div>
+                ${expanded ? item.categories.map((category) => this.renderRailCategory(category)).join("") : ""}
+              `;
+            }
+            if (item.type === "category") {
+              return this.renderRailCategory(item, index);
+            }
+            // favorites / recents / all
+            return `
+              <div class="live-rail-row focusable"
+                   role="button"
+                   data-action="selectRail"
+                   data-rail-id="${escapeHtml(item.railId)}"
+                   data-rail-index="${index}">
+                <span class="live-rail-icon" aria-hidden="true">${item.type === "favorites" ? "★" : item.type === "recents" ? "↺" : "☰"}</span>
+                <span class="live-rail-label">${escapeHtml(item.label)}</span>
+                <span class="live-rail-count">${escapeHtml(countLabel(item.count))}</span>
+              </div>
+            `;
+          })
+          .join("");
+        return `<nav class="live-rail${dimmed}" aria-label="${escapeHtml(t("live_rail_label", {}, "Categorías"))}">${rows}</nav>`;
+      } catch (error) {
+        reportLiveErrorSafe(error, "renderRail");
+        return `<nav class="live-rail"><div class="live-rail-row live-rail-search focusable" data-action="openSearch" role="button"><span class="live-rail-label">Buscar</span></div></nav>`;
+      }
+    },
+
+    renderRailCategory(category, index = 0) {
+      return `
+        <div class="live-rail-row live-rail-category focusable"
+             role="button"
+             data-action="selectRail"
+             data-rail-id="${escapeHtml(category.railId)}"
+             data-rail-index="${Number(index) || 0}">
+          <span class="live-rail-label">${escapeHtml(category.label)}</span>
+          <span class="live-rail-count">${escapeHtml(countLabel(category.count))}</span>
+        </div>
+      `;
+    },
+
+    // The flat rail items for the CURRENT state (pure model above).
+    railItems() {
+      return buildRailItems({
+        categories: this.categories,
+        channelsByColumn: this.channelsByColumn,
+        favoriteCount: this.favoriteSet?.size
+          ? this.unionCachedChannels().filter((channel) => this.favoriteSet.has(String(channel?.id))).length
+          : 0,
+        recentCount: Array.isArray(this.recentChannels) ? this.recentChannels.length : 0
+      });
+    },
+
+    // The union of every cached per-category channel list, deduplicated by the
+    // stable channel id. One implementation shared by the "Todos" count, the
+    // favorites rows and the search filter.
     unionCachedChannels() {
       const union = new Map();
       const caches = this.channelsByColumn instanceof Map ? this.channelsByColumn : new Map();
@@ -422,59 +669,32 @@ export function createLiveScreenMethods02() {
       return Array.from(union.values());
     },
 
-    // Group sections for the current state: favorites first (only when it has
-    // channels), then one per portal category.
-    groupSections() {
-      const favoriteChannels = this.favoriteSet?.size
-        ? this.unionCachedChannels().filter((channel) => this.favoriteSet.has(String(channel?.id)))
-        : [];
-      return buildGroupSections({
-        categories: this.categories,
-        channelsByColumn: this.channelsByColumn,
-        favoriteChannels,
-        favoritesLabel: t("live_chip_favorites", {}, "Favoritos")
-      });
-    },
-
-    // Expanded ids live in the module-level Set (persists across visits).
-    expandedGroupIdSet() {
-      return expandedGroupIds;
-    },
-
-    // The flat focus order for the CURRENT state: while searching, flat
-    // matching rows with no groups (mobile search results); otherwise group
-    // headers interleaved with their expanded rows.
-    flatItems() {
-      if (this.searchActive && String(this.searchQuery || "").trim()) {
-        return (Array.isArray(this.channels) ? this.channels : []).map((channel) => ({
-          type: "channel",
-          groupId: "",
-          channel
-        }));
-      }
-      return flattenSections(this.groupSections(), expandedGroupIds);
-    },
-
-    // Deterministic zone/index normalization: maps the mount module's legacy
-    // initial zone, clamps the flat index to the real item count, and bounces
-    // an empty list back to the header so no state can dead-end the D-pad.
+    // Deterministic zone/index normalization: clamps every index to the real
+    // item count and bounces impossible zones back to a reachable one so no
+    // state can dead-end the D-pad (loading, empty category, error).
     normalizeFocusState() {
-      if (this.focusZone === "chips") this.focusZone = "list";
-      if (this.focusZone === "header") {
-        this.headerIndex = clampIndex(this.headerIndex || 0, 2);
-        return;
+      const railLength = this.railItems().length;
+      if (this.focusZone === "hero") {
+        // The hero actions only exist while the hero is visible.
+        if (!this.heroChannel) {
+          this.focusZone = "rail";
+        } else {
+          this.heroIndex = clampIndex(this.heroIndex || 0, 2);
+          return;
+        }
       }
-      const items = this.flatItems();
-      if (!items.length) {
-        this.focusZone = "header";
-        this.headerIndex = 0;
-        return;
+      if (this.focusZone === "rows") {
+        const rows = this.visibleChannels();
+        if (!rows.length) {
+          this.focusZone = "rail";
+        } else {
+          this.rowIndex = clampIndex(Number.isInteger(this.rowIndex) ? this.rowIndex : 0, rows.length);
+          return;
+        }
       }
-      const current = Number.isInteger(this.flatIndex) ? this.flatIndex : Number.isInteger(this.rowIndex) ? this.rowIndex : 0;
-      this.flatIndex = clampIndex(current, items.length);
-      if (items[this.flatIndex]?.type !== "channel") {
-        this.rowFocusTarget = "row";
-      }
+      // Rail zone (or bounced back into it): the search row always exists.
+      this.focusZone = "rail";
+      this.railIndex = clampIndex(Number.isInteger(this.railIndex) ? this.railIndex : 0, railLength);
     },
 
     // Applies the deterministic focus state to the DOM: marks the focused
@@ -492,110 +712,106 @@ export function createLiveScreenMethods02() {
           focusWithoutAutoScrollSafe(target);
           this.ensureFocusVisible?.({ smooth });
         }
+        // The hero highlights the focused channel (sticky: it stays visible
+        // after LEFT returns to the rail, until a new row takes over).
+        if (this.focusZone === "rows") {
+          const rows = this.visibleChannels?.() || [];
+          const channel = rows[this.rowIndex] || null;
+          if (channel) this.heroChannel = channel;
+        }
+        this.updateHeroForFocus();
       } catch (error) {
         reportLiveErrorSafe(error, "applyFocusState");
       }
     },
 
     // The single source of truth for "which element has focus right now".
-    // Every zone resolves to a real node (header pill fallback) so a missing
+    // Every zone resolves to a real node (rail row fallback) so a missing
     // list can never leave the D-pad pointing at nothing.
     focusedNode() {
       if (!this.container) return null;
       if (this.searchActive) {
         return this.container.querySelector(".live-search-input");
       }
-      if (this.focusZone === "header") {
-        const pills = this.container.querySelectorAll(".live-header-actions .live-pill");
-        return pills[this.headerIndex || 0] || pills[0] || null;
+      if (this.focusZone === "hero") {
+        const pills = this.container.querySelectorAll(".live-hero-actions .live-pill");
+        return pills[this.heroIndex || 0] || pills[0] || null;
       }
-      const node = this.container.querySelector(`[data-flat-index="${this.flatIndex}"]`);
-      if (!node) {
-        return this.container.querySelector(".live-header-actions .live-pill");
+      if (this.focusZone === "rows") {
+        const node = this.container.querySelector(`[data-row-index="${this.rowIndex}"]`);
+        if (node && this.rowFocusTarget === "star") {
+          return node.querySelector(".live-star") || node;
+        }
+        if (node) return node;
+        // Fall through to the rail when the rows vanished.
       }
-      if (this.rowFocusTarget === "star" && node.classList.contains("live-channel-row")) {
-        return node.querySelector(".live-star") || node;
-      }
-      return node;
+      const railNode = this.container.querySelector(`[data-rail-index="${this.railIndex}"]`);
+      if (railNode) return railNode;
+      return this.container.querySelector(".live-rail .focusable") || this.container.querySelector(".focusable");
     },
 
-    // The grouped list: favorites group first (only when it has channels),
-    // then one collapsible group per category. With search active the list is
-    // flat matching rows, exactly like the mobile search results.
-    renderChannelList() {
-      if (this.categoriesLoading) {
-        return `
-          <div class="live-channel-list" aria-busy="true">
-            <div class="live-panel-state">${renderLoadingIndicator()}<span>${escapeHtml(t("live_categories_loading", {}, "Loading categories..."))}</span></div>
-          </div>
-        `;
-      }
-      if (this.categoriesError) {
-        return `<div class="live-channel-list"><div class="live-panel-error">${escapeHtml(
-          `${t("live_categories_error", {}, "Could not load Live TV")}: ${this.categoriesError}`
-        )}</div></div>`;
-      }
+    // The channels behind the current rail selection (or the search filter).
+    // Data comes only from the per-category caches and the recents snapshots:
+    // selecting never triggers a portal call here, loading happens explicitly
+    // in loadChannelsForCategory when a category is chosen.
+    visibleChannels() {
       if (this.searchActive && String(this.searchQuery || "").trim()) {
-        const results = Array.isArray(this.channels) ? this.channels : [];
-        if (!results.length) {
-          return `<div class="live-channel-list"><div class="live-panel-hint">${escapeHtml(t("live_search_empty", {}, "Sin resultados"))}</div></div>`;
-        }
-        return `<div class="live-channel-list">${results.map((channel) => this.renderChannelRow(channel)).join("")}</div>`;
+        return Array.isArray(this.channels) ? this.channels : [];
       }
-      const sections = this.groupSections();
-      if (!sections.length) {
-        return `<div class="live-channel-list"><div class="live-panel-hint">${escapeHtml(t("live_channels_empty", {}, "No channels available"))}</div></div>`;
+      if (String(this.railSelection) === RAIL_RECENTS_ID) {
+        return Array.isArray(this.recentChannels) ? this.recentChannels : [];
       }
-      if (sections.some((section) => section.loading)) {
-        this.scheduleCountsRefresh();
-      }
-      let flatIndex = 0;
-      const blocks = sections
-        .map((section) => {
-          const expanded = expandedGroupIds.has(String(section.groupId));
-          const countLabel = section.loading ? "…" : String(section.count ?? 0);
-          const header = `
-            <article class="live-group-header focusable"
-                     role="button"
-                     data-action="toggleGroup"
-                     data-group-id="${escapeHtml(section.groupId)}"
-                     data-flat-index="${flatIndex++}"
-                     aria-expanded="${expanded ? "true" : "false"}">
-              <span class="live-group-chevron${expanded ? " is-expanded" : ""}" aria-hidden="true">▸</span>
-              <span class="live-group-label">${escapeHtml(section.label)}</span>
-              <span class="live-group-count">${escapeHtml(countLabel)}</span>
-            </article>`;
-          if (!expanded) return header;
-          const rows =
-            section.loading && !section.channels.length
-              ? `<div class="live-panel-state">${renderLoadingIndicator()}<span>${escapeHtml(t("live_channels_loading", {}, "Loading channels..."))}</span></div>`
-              : section.channels.map((channel) => this.renderChannelRow(channel)).join("");
-          return `${header}<div class="live-group-rows" data-group-id="${escapeHtml(section.groupId)}">${rows}</div>`;
-        })
-        .join("");
-      return `<div class="live-channel-list">${blocks}</div>`;
+      return Array.isArray(this.channels) ? this.channels : [];
     },
 
-    // While group counts are still loading, repaint ONCE when the background
-    // preload fills the caches, instead of leaving "…" on the cards forever.
-    scheduleCountsRefresh() {
-      if (this.countsRefreshTimer) return;
-      const startedAt = Date.now();
-      const tick = () => {
-        this.countsRefreshTimer = 0;
-        if (Router.getCurrent?.() !== "live") return;
-        const pending = this.groupSections().some((section) => section.loading);
-        if (!pending) {
-          this.updateRowsOnly();
-          return;
+    // The channel rows on the right: one per line, the existing row design
+    // (logo with letter fallback, `N. Nombre`, muted source, star). States
+    // (loading / empty / error / search hint) always keep the rail reachable.
+    renderChannelList() {
+      try {
+        if (this.categoriesLoading) {
+          return `
+            <div class="live-channel-list" aria-busy="true">
+              <div class="live-panel-state">${renderLoadingIndicator()}<span>${escapeHtml(t("live_categories_loading", {}, "Loading categories..."))}</span></div>
+            </div>
+          `;
         }
-        if (Date.now() - startedAt > 24000) return;
-        this.countsRefreshTimer = setTimeout(tick, 1500);
-      };
-      this.countsRefreshTimer = setTimeout(tick, 1500);
+        if (this.categoriesError) {
+          return `<div class="live-channel-list"><div class="live-panel-error">${escapeHtml(
+            `${t("live_categories_error", {}, "Could not load Live TV")}: ${this.categoriesError}`
+          )}</div></div>`;
+        }
+        if (this.searchActive && String(this.searchQuery || "").trim()) {
+          const results = Array.isArray(this.channels) ? this.channels : [];
+          if (!results.length) {
+            return `<div class="live-channel-list"><div class="live-panel-hint">${escapeHtml(t("live_search_empty", {}, "Sin resultados"))}</div></div>`;
+          }
+          return `<div class="live-channel-list">${results.map((channel, index) => this.renderChannelRow(channel, index)).join("")}</div>`;
+        }
+        if (this.channelsLoading) {
+          return `
+            <div class="live-channel-list" aria-busy="true">
+              <div class="live-panel-state">${renderLoadingIndicator()}<span>${escapeHtml(t("live_channels_loading", {}, "Loading channels..."))}</span></div>
+            </div>
+          `;
+        }
+        if (this.channelsError) {
+          return `<div class="live-channel-list"><div class="live-panel-error">${escapeHtml(
+            `${t("live_channels_error", {}, "Could not load the channels")}: ${this.channelsError}`
+          )}</div></div>`;
+        }
+        const rows = this.visibleChannels();
+        if (!rows.length) {
+          return `<div class="live-channel-list"><div class="live-panel-hint">${escapeHtml(t("live_channels_empty", {}, "No channels available"))}</div></div>`;
+        }
+        return `<div class="live-channel-list">${rows.map((channel, index) => this.renderChannelRow(channel, index)).join("")}</div>`;
+      } catch (error) {
+        reportLiveErrorSafe(error, "renderChannelList");
+        return `<div class="live-channel-list"><div class="live-panel-error">Live TV error</div></div>`;
+      }
     },
 
-    renderChannelRow(channel) {
+    renderChannelRow(channel, index = 0) {
       const label = formatChannelRowLabel(channel);
       const logo = channelLogoInfo(channel);
       const isFavorite = this.isFavoriteId(channel?.id);
@@ -603,6 +819,7 @@ export function createLiveScreenMethods02() {
       return `
         <article class="live-channel-row focusable"
                  data-action="tuneIn"
+                 data-row-index="${Number(index) || 0}"
                  data-channel-id="${escapeHtml(String(channel?.id || ""))}"
                  data-channel-title="${escapeHtml(channel?.name || t("live_channel_fallback_title", {}, "Live channel"))}">
           <div class="live-row-logo">
@@ -625,66 +842,44 @@ export function createLiveScreenMethods02() {
       `;
     },
 
-    // Re-stamps data-flat-index over the live DOM order. Used after a surgical
-    // group toggle so the flat focus model and the DOM never disagree.
-    reindexFlatDom() {
-      const nodes = this.container?.querySelectorAll(".live-group-header, .live-channel-row");
-      let index = 0;
-      nodes?.forEach((node) => {
-        node.dataset.flatIndex = String(index);
-        index += 1;
-      });
-    },
-
-    // In-place refresh of the list only (search typing, favourite toggles,
-    // group data arrival). Focus movement never goes through here: it toggles
-    // classes directly so a keypress costs no re-render.
+    // In-place refresh of the rail counts and the channel list only (data
+    // arrival, search typing, favourite toggles, recent updates). Focus
+    // movement never goes through here: it toggles classes directly so a
+    // keypress costs no re-render.
     updateRowsOnly() {
       if (!this.container) return;
       try {
         const list = this.container.querySelector(".live-channel-list");
-        if (!list) {
-          this.render();
-          return;
-        }
-        const previousScrollTop = list.scrollTop;
+        const previousScrollTop = list?.scrollTop ?? 0;
         const temp = document.createElement("div");
-        temp.innerHTML = this.renderChannelList();
-        const next = temp.firstElementChild;
-        if (next) {
-          list.replaceWith(next);
-          next.scrollTop = previousScrollTop;
+        temp.innerHTML = `
+          ${this.renderHero()}
+          ${this.renderRail()}
+          ${this.renderChannelList()}
+        `;
+        const nextHero = temp.querySelector(".live-hero");
+        const nextRail = temp.querySelector(".live-rail");
+        const nextList = temp.querySelector(".live-channel-list");
+        const currentHero = this.container.querySelector(".live-hero");
+        if (nextHero && currentHero) {
+          currentHero.replaceWith(nextHero);
         }
-        this.reindexFlatDom();
+        const currentRail = this.container.querySelector(".live-rail");
+        if (nextRail && currentRail) {
+          currentRail.replaceWith(nextRail);
+        }
+        if (nextList && list) {
+          nextList.scrollTop = previousScrollTop;
+          list.replaceWith(nextList);
+        } else if (nextList) {
+          this.container.querySelector(".live-body")?.appendChild(nextList);
+        }
         ScreenUtils.indexFocusables(this.container);
+        this.bindSearchInput();
         this.applyFocusState();
+        this.updateHeroForFocus({ force: true });
       } catch (error) {
         reportLiveErrorSafe(error, "updateRowsOnly");
-      }
-    },
-
-    // Recomputes the visible channel set for search/favorites state without
-    // touching the network, then repaints the list in place. Overrides the
-    // mount module's full-screen render with the same recompute logic but a
-    // list-only update, so data arrival never rebuilds the whole screen.
-    refreshVisibleChannels() {
-      try {
-        if (this.listDependsOnAllCaches?.()) {
-          let all = this.unionCachedChannels();
-          if (this.searchActive && this.searchQuery) {
-            all = all.filter((channel) => internals.channelMatchesQuery(channel, this.searchQuery));
-          }
-          if (String(this.activeChipId) === internals.FAVORITES_CHIP_ID && !(this.searchActive && this.searchQuery)) {
-            all = all.filter((channel) => this.favoriteSet?.has(String(channel?.id)));
-          }
-          this.channels = all;
-        }
-        this.channelsLoading = false;
-        this.channelsError = "";
-        this.clampRowIndex?.();
-        this.updateRowsOnly();
-      } catch (error) {
-        reportLiveErrorSafe(error, "refreshVisibleChannels");
       }
     }
   };

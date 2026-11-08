@@ -1,4 +1,4 @@
-// Layout helpers for the Live TV screen (Android TV reference style).
+// Layout contract for the Live TV screen (Android TV reference, left rail).
 // Pure functions only: no DOM, no network, no i18n — node --test must run
 // fully offline. The screen module exports these helpers alongside its
 // rendering methods; this file pins their exact observable behaviour.
@@ -9,7 +9,6 @@ import { readFileSync } from "node:fs";
 import {
   sourceNameFromChannelId,
   sourceNameFromColumnId,
-  formatChipLabel,
   formatChannelRowLabel,
   channelLogoInfo,
   normalizeSearchText,
@@ -18,8 +17,20 @@ import {
   readFavoriteIds,
   writeFavoriteIds,
   toggleFavoriteId,
-  buildGroupSections,
-  flattenSections,
+  RECENTS_STORAGE_KEY,
+  MAX_RECENT_CHANNELS,
+  readRecentChannels,
+  writeRecentChannels,
+  pushRecentChannel,
+  RAIL_SEARCH_ID,
+  RAIL_FAVORITES_ID,
+  RAIL_RECENTS_ID,
+  RAIL_ALL_ID,
+  categoryRailId,
+  buildRailItems,
+  collapsedSourceIdsRef,
+  isSourceExpanded,
+  toggleSourceCollapsed,
   clampIndex,
   shouldAcceptRepeatMove
 } from "../js/ui/screens/live/liveScreenMethods-02-render.js";
@@ -40,27 +51,6 @@ describe("sourceNameFromChannelId", () => {
   test("returns an empty string for missing input", () => {
     assert.equal(sourceNameFromChannelId(""), "");
     assert.equal(sourceNameFromChannelId(null), "");
-  });
-});
-
-describe("formatChipLabel", () => {
-  test("prefixes the source for a PremiumTV group", () => {
-    assert.equal(
-      formatChipLabel({ columnId: "premiumtv:El Salvador – TCS", name: "El Salvador – TCS" }),
-      "PremiumTV · El Salvador – TCS"
-    );
-  });
-
-  test("prefixes Magis for an unprefixed (numeric) Magis column id", () => {
-    assert.equal(formatChipLabel({ columnId: 42, name: "Deportes" }), "Magis · Deportes");
-  });
-
-  test("falls back to a placeholder name when the category has none", () => {
-    assert.equal(formatChipLabel({ columnId: "premiumtv:Grupo A", name: "" }), "PremiumTV · Unnamed");
-  });
-
-  test("omits the prefix when the column id has no known source", () => {
-    assert.equal(formatChipLabel({ columnId: "", name: "Deportes" }), "Deportes");
   });
 });
 
@@ -163,95 +153,188 @@ describe("favourites", () => {
   });
 });
 
-describe("buildGroupSections (mobile-style collapsible groups)", () => {
-  const categories = [
-    { columnId: 42, name: "Deportes" },
-    { columnId: "premiumtv:El Salvador – TCS", name: "El Salvador – TCS" }
-  ];
-  const caches = new Map([["42", [{ id: "magis:live:a" }, { id: "magis:live:b" }]]]);
+describe("recently watched (persisted last tuned channels)", () => {
+  const memoryStorage = () => {
+    const map = new Map();
+    return {
+      getItem: (key) => (map.has(key) ? map.get(key) : null),
+      setItem: (key, value) => map.set(key, String(value)),
+      removeItem: (key) => map.delete(key)
+    };
+  };
 
-  test("the favorites group sits first and only when it has channels", () => {
-    const withFavorites = buildGroupSections({
-      categories,
-      channelsByColumn: caches,
-      favoriteChannels: [{ id: "premiumtv:x" }],
-      favoritesLabel: "Favoritos"
-    });
-    assert.equal(withFavorites[0].groupId, "__favorites__");
-    assert.equal(withFavorites[0].label, "Favoritos");
-    assert.equal(withFavorites[0].count, 1);
-
-    const withoutFavorites = buildGroupSections({
-      categories,
-      channelsByColumn: caches,
-      favoriteChannels: [],
-      favoritesLabel: "Favoritos"
-    });
-    assert.equal(withoutFavorites.some((s) => s.groupId === "__favorites__"), false);
+  test("push moves the channel to the front, deduped by stable id", () => {
+    let recents = pushRecentChannel([], { id: "magis:live:a", name: "A" });
+    recents = pushRecentChannel(recents, { id: "premiumtv:b", name: "B" });
+    assert.deepEqual(recents.map((r) => r.id), ["premiumtv:b", "magis:live:a"]);
+    recents = pushRecentChannel(recents, { id: "magis:live:a", name: "A" });
+    assert.deepEqual(recents.map((r) => r.id), ["magis:live:a", "premiumtv:b"]);
+    assert.equal(recents.length, 2);
   });
 
-  test("there is no Todos group: one section per category, source-prefixed", () => {
-    const sections = buildGroupSections({
-      categories,
-      channelsByColumn: caches,
-      favoriteChannels: [],
-      favoritesLabel: "Favoritos"
+  test("keeps a snapshot (id, name, logo, number) so rows render before caches warm", () => {
+    const recents = pushRecentChannel([], {
+      id: "magis:live:a",
+      name: "Antena 3",
+      logo: "http://example.test/a.png",
+      number: 7,
+      code: "a",
+      group: "x"
     });
-    assert.equal(sections.some((s) => s.groupId === "__all__"), false);
-    assert.equal(sections[0].groupId, "42");
-    assert.equal(sections[0].label, "Magis · Deportes");
-    assert.equal(sections[0].count, 2);
-    assert.equal(sections[0].loading, false);
-    assert.equal(sections[1].groupId, "premiumtv:El Salvador – TCS");
-    assert.equal(sections[1].label, "PremiumTV · El Salvador – TCS");
+    assert.deepEqual(recents[0], { id: "magis:live:a", name: "Antena 3", logo: "http://example.test/a.png", number: 7 });
   });
 
-  test("a category whose channels are not cached yet is a loading group", () => {
-    const sections = buildGroupSections({
-      categories,
-      channelsByColumn: caches,
-      favoriteChannels: [],
-      favoritesLabel: "Favoritos"
-    });
-    assert.equal(sections[1].loading, true);
-    assert.equal(sections[1].count, null);
-    assert.deepEqual(sections[1].channels, []);
+  test("caps the list at MAX_RECENT_CHANNELS", () => {
+    assert.equal(MAX_RECENT_CHANNELS, 12);
+    let recents = [];
+    for (let i = 0; i < MAX_RECENT_CHANNELS + 3; i += 1) {
+      recents = pushRecentChannel(recents, { id: `magis:live:c${i}`, name: `C${i}` });
+    }
+    assert.equal(recents.length, MAX_RECENT_CHANNELS);
+    assert.equal(recents[0].id, `magis:live:c${MAX_RECENT_CHANNELS + 2}`);
+    assert.equal(recents.at(-1).id, `magis:live:c3`); // oldest three dropped
   });
 
-  test("malformed categories are skipped, not thrown on", () => {
-    const sections = buildGroupSections({
-      categories: [null, { columnId: "", name: "x" }, { columnId: "premiumtv:ok", name: "Ok" }],
-      channelsByColumn: new Map(),
-      favoriteChannels: [],
-      favoritesLabel: "Favoritos"
-    });
-    assert.deepEqual(sections.map((s) => s.groupId), ["premiumtv:ok"]);
+  test("a channel without an id is never pushed", () => {
+    assert.deepEqual(pushRecentChannel([], { name: "no id" }), []);
+    assert.deepEqual(pushRecentChannel([], null), []);
+  });
+
+  test("round-trips through a namespaced storage key", () => {
+    const storage = memoryStorage();
+    assert.equal(RECENTS_STORAGE_KEY.startsWith("nuvio."), true);
+    assert.deepEqual(readRecentChannels(storage), []);
+    writeRecentChannels([{ id: "premiumtv:8f3a2b", name: "TCS", logo: "", number: null }], storage);
+    assert.deepEqual(readRecentChannels(storage), [{ id: "premiumtv:8f3a2b", name: "TCS", logo: "", number: null }]);
+  });
+
+  test("corrupt storage payload reads as empty, not a crash", () => {
+    const storage = memoryStorage();
+    storage.setItem(RECENTS_STORAGE_KEY, "{not json");
+    assert.deepEqual(readRecentChannels(storage), []);
+  });
+
+  test("a storage that throws never breaks the caller", () => {
+    const throwing = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); } };
+    assert.deepEqual(readRecentChannels(throwing), []);
+    assert.doesNotThrow(() => writeRecentChannels([], throwing));
   });
 });
 
-describe("flattenSections (flat focus order: header, then its rows)", () => {
-  const sections = [
-    { groupId: "g1", label: "A", count: 2, loading: false, channels: [{ id: "a" }, { id: "b" }] },
-    { groupId: "g2", label: "B", count: 1, loading: false, channels: [{ id: "c" }] }
+describe("buildRailItems (left column: search, favorites, recents, all, source sections)", () => {
+  const categories = [
+    { columnId: 42, name: "Deportes" },
+    { columnId: 43, name: "Noticias" },
+    { columnId: "premiumtv:El Salvador – TCS", name: "El Salvador – TCS" }
   ];
+  const caches = new Map([
+    ["42", [{ id: "magis:live:a" }, { id: "magis:live:b" }, { id: "magis:live:a2" }]],
+    ["43", [{ id: "magis:live:c" }]],
+    ["premiumtv:El Salvador – TCS", [{ id: "premiumtv:x" }, { id: "premiumtv:y" }]]
+  ]);
 
-  test("collapsed groups render only their header card", () => {
-    const items = flattenSections(sections, new Set());
-    assert.deepEqual(items.map((i) => [i.type, i.groupId]), [["group", "g1"], ["group", "g2"]]);
+  test("search first, then Favoritos (always), then Vistos recientemente only when non-empty, then Todos", () => {
+    const withRecents = buildRailItems({
+      categories,
+      channelsByColumn: caches,
+      favoriteCount: 2,
+      recentCount: 3
+    });
+    assert.deepEqual(
+      withRecents.map((item) => item.railId),
+      [RAIL_SEARCH_ID, RAIL_FAVORITES_ID, RAIL_RECENTS_ID, RAIL_ALL_ID, "source:Magis", categoryRailId(42), categoryRailId(43), "source:PremiumTV", categoryRailId("premiumtv:El Salvador – TCS")]
+    );
+
+    const withoutRecents = buildRailItems({
+      categories,
+      channelsByColumn: caches,
+      favoriteCount: 0,
+      recentCount: 0
+    });
+    assert.equal(withoutRecents.some((item) => item.railId === RAIL_RECENTS_ID), false);
   });
 
-  test("an expanded group renders its header followed by its own rows", () => {
-    const items = flattenSections(sections, new Set(["g1"]));
-    assert.deepEqual(items.map((i) => i.type), ["group", "channel", "channel", "group"]);
-    assert.equal(items[1].groupId, "g1");
-    assert.equal(items[1].channel.id, "a");
-    assert.equal(items[2].groupId, "g1");
-    assert.equal(items[3].groupId, "g2");
+  test("Todos carries the deduplicated union total of the cached lists", () => {
+    const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
+    const all = items.find((item) => item.railId === RAIL_ALL_ID);
+    // 4 magis + 2 premiumtv, no overlaps
+    assert.equal(all.count, 6);
   });
 
-  test("a missing expanded-set collapses everything instead of throwing", () => {
-    const items = flattenSections(sections, undefined);
-    assert.equal(items.length, 2);
+  test("one section per SOURCE (not per category), in first-appearance order", () => {
+    const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
+    const sources = items.filter((item) => item.type === "source");
+    assert.deepEqual(sources.map((s) => s.label), ["Magis", "PremiumTV"]);
+  });
+
+  test("a source's count is the sum of its cached categories; '…' while any is pending", () => {
+    const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
+    const magis = items.find((item) => item.railId === "source:Magis");
+    const premium = items.find((item) => item.railId === "source:PremiumTV");
+    assert.equal(magis.count, 4); // both Magis categories cached
+    assert.equal(premium.count, 2);
+    assert.equal(magis.expanded, true);
+
+    const pending = buildRailItems({
+      categories,
+      channelsByColumn: new Map([["42", [{ id: "a" }]]]),
+      favoriteCount: 0,
+      recentCount: 0
+    });
+    const magisPending = pending.find((item) => item.railId === "source:Magis");
+    assert.equal(magisPending.count, null); // renders as "…"
+  });
+
+  test("category rows live under their source section with plain names and counts", () => {
+    const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
+    const magis = items.find((item) => item.railId === "source:Magis");
+    const premium = items.find((item) => item.railId === "source:PremiumTV");
+    assert.deepEqual(
+      magis.categories.map((c) => [c.label, c.count, c.loading]),
+      [["Deportes", 3, false], ["Noticias", 1, false]]
+    );
+    assert.deepEqual(premium.categories.map((c) => [c.label, c.count]), [["El Salvador – TCS", 2]]);
+    assert.equal(magis.categories[0].railId, categoryRailId(42));
+  });
+
+  test("malformed categories are skipped, not thrown on", () => {
+    const items = buildRailItems({
+      categories: [null, { columnId: "", name: "x" }, { columnId: "premiumtv:ok", name: "Ok" }],
+      channelsByColumn: new Map(),
+      favoriteCount: 0,
+      recentCount: 0
+    });
+    assert.deepEqual(
+      items.filter((i) => i.type === "source").map((s) => s.railId),
+      ["source:PremiumTV"]
+    );
+  });
+
+  test("the rail never collapses to empty: search, favorites and all always exist", () => {
+    const items = buildRailItems({ categories: [], channelsByColumn: new Map(), favoriteCount: 0, recentCount: 0 });
+    assert.deepEqual(items.map((item) => item.railId), [RAIL_SEARCH_ID, RAIL_FAVORITES_ID, RAIL_ALL_ID]);
+  });
+});
+
+describe("source collapse state (expanded by default, remembered)", () => {
+  test("a source is expanded unless explicitly collapsed", () => {
+    const collapsed = new Set();
+    assert.equal(isSourceExpanded("source:Magis", collapsed), true);
+    collapsed.add("source:Magis");
+    assert.equal(isSourceExpanded("source:Magis", collapsed), false);
+    assert.equal(isSourceExpanded("source:PremiumTV", collapsed), true);
+  });
+
+  test("toggleSourceCollapsed flips exactly one source", () => {
+    const collapsed = new Set();
+    toggleSourceCollapsed(collapsed, "source:Magis");
+    assert.equal(isSourceExpanded("source:Magis", collapsed), false);
+    toggleSourceCollapsed(collapsed, "source:Magis");
+    assert.equal(isSourceExpanded("source:Magis", collapsed), true);
+  });
+
+  test("the module-level set is the one shared owner", () => {
+    assert.equal(collapsedSourceIdsRef() instanceof Set, true);
   });
 });
 
@@ -290,7 +373,7 @@ describe("shouldAcceptRepeatMove (coalesce held-key repeats)", () => {
   });
 });
 
-describe("mobile-style grouped layout (source contract)", () => {
+describe("Android TV reference layout (source contract)", () => {
   const renderSource = readFileSync(
     new URL("../js/ui/screens/live/liveScreenMethods-02-render.js", import.meta.url),
     "utf8"
@@ -299,29 +382,63 @@ describe("mobile-style grouped layout (source contract)", () => {
     new URL("../js/ui/screens/live/liveScreenMethods-03-tune-in.js", import.meta.url),
     "utf8"
   );
+  const mountSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-01-mount-and-load.js", import.meta.url),
+    "utf8"
+  );
 
-  test("one full-width list: no preview panel, no rail, no chips row", () => {
-    assert.match(renderSource, /\.live-channel-list\s*\{[^}]*flex:\s*1/);
-    assert.doesNotMatch(renderSource, /live-preview/);
-    assert.doesNotMatch(renderSource, /live-rail|live-chips-row/);
-    assert.doesNotMatch(renderSource, /width:\s*50%/);
+  test("a hero panel on top: badge, preview box, no invented EPG", () => {
+    assert.match(renderSource, /live-hero\b/);
+    assert.match(renderSource, /live-hero-badge/);
+    assert.match(renderSource, /EN VIVO/);
+    assert.match(renderSource, /live-hero-preview/);
+    assert.match(renderSource, /Sin información de programa/);
+    // No EPG: no progress bar, no fake times.
+    assert.doesNotMatch(renderSource, /live-hero-progress/);
   });
 
-  test("groups are header cards with label, count and an expanded/collapsed chevron", () => {
-    assert.match(renderSource, /live-group-header/);
-    assert.match(renderSource, /live-group-chevron/);
-    assert.match(renderSource, /live-group-count/);
-    assert.match(renderSource, /aria-expanded=/);
+  test("the hero preview keeps the channel logo centred instead of a fake thumbnail", () => {
+    assert.match(renderSource, /\.live-hero-preview img\s*\{[^}]*object-fit:\s*contain/);
   });
 
-  test("channel rows are indented under their expanded group", () => {
-    assert.match(renderSource, /live-group-rows/);
+  test("a left vertical rail with search, fixed rows and per-source sections", () => {
+    assert.match(renderSource, /live-rail\b/);
+    assert.match(renderSource, /live-rail-search/);
+    assert.match(renderSource, /live-rail-row/);
+    assert.match(renderSource, /live-source-header/);
+    assert.match(renderSource, /live-rail-category/);
+    // rotating chevron: expanded ▾, collapsed ›
+    assert.match(renderSource, /▾/);
+    assert.match(renderSource, /›/);
+  });
+
+  test("the rail is the narrow left column (~21%) next to the channel list", () => {
+    assert.match(renderSource, /\.live-rail\s*\{[^}]*flex:\s*0\s+0\s+21%/);
+    assert.match(renderSource, /live-channel-list/);
+  });
+
+  test("focused rows use the white rounded outline of the reference", () => {
+    assert.match(renderSource, /outline:\s*3px solid\s*(var\(--secondary-color, ?)?#f+f/i);
+    assert.match(renderSource, /transition:\s*background-color/);
+  });
+
+  test("the old layouts are gone: no chips row, no mobile group cards, no full-width header", () => {
+    assert.doesNotMatch(renderSource, /live-chips-row/);
+    assert.doesNotMatch(renderSource, /live-group-header/);
+  });
+
+  test("channel rows keep the existing design: number, logo, name, source, star", () => {
+    assert.match(renderSource, /live-row-logo/);
+    assert.match(renderSource, /live-row-number/);
+    assert.match(renderSource, /live-row-name/);
+    assert.match(renderSource, /live-row-source/);
+    assert.match(renderSource, /live-star/);
   });
 
   test("focus movement toggles classes instead of re-rendering, and coalesces repeats", () => {
     assert.match(tuneSource, /MOVE_CADENCE_MS/);
-    assert.match(tuneSource, /moveFlat/);
-    assert.match(renderSource, /transition:\s*background-color/);
+    assert.match(tuneSource, /moveRail|moveRows/);
+    assert.match(tuneSource, /applyFocusState/);
   });
 
   test("short eased scroll, never a long smooth scroll", () => {
@@ -329,11 +446,21 @@ describe("mobile-style grouped layout (source contract)", () => {
     assert.doesNotMatch(tuneSource, /behavior:\s*"smooth"/);
   });
 
+  test("tuning persists the channel into Vistos recientemente and hands off with returnRoute live", () => {
+    assert.match(tuneSource, /pushRecentChannel/);
+    assert.match(tuneSource, /writeRecentChannels/);
+    assert.match(tuneSource, /returnRoute:\s*"live"/);
+  });
+
   test("errors are reported through the live-error beacon, never swallowed silently", () => {
     assert.match(tuneSource, /phase:\s*"live-error"/);
     assert.match(renderSource, /phase:\s*"live-error"/);
     assert.match(renderSource, /catch \(error\)/);
     assert.match(tuneSource, /catch \(error\)/);
+  });
+
+  test("the mount module keeps the background preload that feeds per-category counts", () => {
+    assert.match(mountSource, /preloadRemainingCategories/);
   });
 });
 
@@ -354,5 +481,11 @@ describe("channelLogoInfo", () => {
     const info = channelLogoInfo({ name: "", logo: "   " });
     assert.equal(info.logo, "");
     assert.equal(info.letter, "?");
+  });
+});
+
+describe("search text normalization", () => {
+  test("strips accents and case", () => {
+    assert.equal(normalizeSearchText("  Televisión Española "), "television espanola");
   });
 });

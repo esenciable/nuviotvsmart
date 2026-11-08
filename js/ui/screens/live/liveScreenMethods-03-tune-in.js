@@ -1,6 +1,6 @@
 /* eslint-disable no-unused-vars */
 import * as internals from "./liveScreen.js";
-import { clampIndex, shouldAcceptRepeatMove, expandedGroupIdsRef } from "./liveScreenMethods-02-render.js";
+import { clampIndex, shouldAcceptRepeatMove, collapsedSourceIdsRef, toggleSourceCollapsed } from "./liveScreenMethods-02-render.js";
 
 const NOTICE_VISIBLE_MS = 6000;
 
@@ -43,22 +43,33 @@ function reportLiveErrorSafe(error, where) {
 
 function liveFocusSnapshot(container) {
   const focused = container?.querySelector(".focusable.focused");
+  const rail = container?.querySelector(".live-rail");
   const list = container?.querySelector(".live-channel-list");
   const size = (el) => (el ? `${Math.round(el.scrollHeight)}/${Math.round(el.clientHeight)}` : "x");
   return {
-    focus: focused ? `${focused.dataset.action || "?"}:${focused.dataset.flatIndex || focused.dataset.focusKey || "?"}` : "none",
+    focus: focused
+      ? `${focused.dataset.action || "?"}:${focused.dataset.railIndex || focused.dataset.rowIndex || focused.dataset.focusKey || "?"}`
+      : "none",
+    rail: rail ? Math.round(rail.scrollTop) : -1,
     list: list ? Math.round(list.scrollTop) : -1,
+    railSize: size(rail),
     listSize: size(list)
   };
 }
 
-// Key handling, activation and tune-in. Focus is a deterministic state model
-// (focusZone + flatIndex + rowFocusTarget) over the FLAT list order (group
-// headers interleaved with their expanded rows) instead of geometric dpad
-// navigation: UP/DOWN move one flat item with class toggles only (no
-// re-render), RIGHT reaches the row's star, Enter activates (group toggle,
-// tune-in, favourite), LEFT backs out of the star. Back exits search before
-// leaving the screen.
+// Key handling, activation and tune-in for the reference layout. Focus is a
+// deterministic state model over two panels plus the hero actions:
+//   rail  (left column)  — UP/DOWN move inside the rail; RIGHT/Enter activate
+//                          the row (select + enter the channel rows; Enter on
+//                          a source header toggles it; Enter on the search row
+//                          opens search); UP from the very top reaches the
+//                          hero actions while the hero is visible.
+//   rows  (right side)   — UP/DOWN move one row (class toggles only); Enter
+//                          tunes in; RIGHT reaches the row's star; LEFT backs
+//                          out to the rail.
+//   hero  (top actions)  — LEFT/RIGHT between the search and guide pills;
+//                          DOWN returns to the rail.
+// Back exits search before leaving the screen.
 export function createLiveScreenMethods03() {
   const { Router, ScreenUtils, liveRepository, isBackEvent, escapeHtml, t } = internals;
 
@@ -104,179 +115,254 @@ export function createLiveScreenMethods03() {
     },
 
     handleHorizontal(delta) {
-      if (this.focusZone === "header") {
+      if (this.focusZone === "hero") {
         // Only the search and guide pills live here.
-        this.headerIndex = clampIndex((this.headerIndex || 0) + delta, 2);
+        this.heroIndex = clampIndex((this.heroIndex || 0) + delta, 2);
         this.applyFocusState({ smooth: true });
         return;
       }
-      // List zone: the only horizontal target is the row's star. Group header
-      // cards have no horizontal neighbour; the star backs out with LEFT.
-      const item = this.flatItems()[this.flatIndex || 0];
-      if (!item || item.type !== "channel") {
+      if (this.focusZone === "rail") {
+        // RIGHT activates the row exactly like Enter (select + enter rows).
+        if (delta > 0) {
+          this.activateRailRow();
+        }
         return;
       }
+      // Rows zone: RIGHT reaches the row's star; LEFT backs out of the star,
+      // and from the row itself returns to the rail.
       if (delta > 0) {
         if (this.rowFocusTarget !== "star") {
           this.rowFocusTarget = "star";
           this.applyFocusState({ smooth: true });
         }
-      } else if (this.rowFocusTarget === "star") {
+        return;
+      }
+      if (this.rowFocusTarget === "star") {
         this.rowFocusTarget = "row";
         this.applyFocusState({ smooth: true });
+        return;
       }
+      this.returnToRail();
     },
 
     handleVertical(delta) {
-      if (this.focusZone === "header") {
-        // DOWN enters the flat list (at its remembered/clamped position); UP
-        // from the header has nowhere to go and stays.
+      if (this.focusZone === "hero") {
+        // DOWN returns to the rail; UP from the pills has nowhere to go.
         if (delta > 0) {
-          this.focusZone = "list";
-          this.rowFocusTarget = "row";
+          this.focusZone = "rail";
           this.applyFocusState({ smooth: true });
         }
         return;
       }
-      // List zone: one flat item per keypress, class toggles only. At the top
-      // of the list UP returns to the header pills.
-      const items = this.flatItems();
-      if (!items.length) return;
-      if (delta < 0 && (this.flatIndex || 0) <= 0) {
-        this.focusZone = "header";
-        this.headerIndex = 0;
-        this.applyFocusState({ smooth: true });
+      if (this.focusZone === "rows") {
+        // One row per keypress, class toggles only. At the top LEFT-side
+        // semantics do not apply: UP past the first row returns to the rail.
+        const rows = this.visibleChannels();
+        if (!rows.length) {
+          this.focusZone = "rail";
+          this.applyFocusState({ smooth: true });
+          return;
+        }
+        if (delta < 0 && (this.rowIndex || 0) <= 0) {
+          this.returnToRail();
+          return;
+        }
+        this.moveRows(delta);
         return;
       }
-      this.moveFlat(delta);
-    },
-
-    // One flat move: coalesce auto-repeats faster than the scroll animation,
-    // then reposition focus by toggling classes only (never a re-render).
-    moveFlat(delta) {
-      const items = this.flatItems();
+      // Rail zone: one item per keypress, class toggles only. UP from the
+      // very top reaches the hero actions while the hero is visible.
+      const items = this.railItems();
       if (!items.length) return;
-      const now = Date.now();
-      if (!shouldAcceptRepeatMove(this.lastFlatMoveAt, now, MOVE_CADENCE_MS)) {
+      if (delta < 0 && (this.railIndex || 0) <= 0) {
+        if (this.heroChannel) {
+          this.focusZone = "hero";
+          this.heroIndex = 0;
+          this.applyFocusState({ smooth: true });
+        }
         return;
       }
-      this.lastFlatMoveAt = now;
-      const next = clampIndex((this.flatIndex || 0) + delta, items.length);
-      if (next === this.flatIndex) return;
-      this.flatIndex = next;
-      this.rowFocusTarget = "row";
-      this.applyFocusState({ smooth: true });
+      this.moveRail(delta);
     },
 
     handleEnter() {
-      if (this.focusZone === "header") {
-        if ((this.headerIndex || 0) === 0) {
+      if (this.focusZone === "hero") {
+        if ((this.heroIndex || 0) === 0) {
           this.openSearch();
         } else {
           this.showGuideNotice();
         }
         return;
       }
-      const item = this.flatItems()[this.flatIndex || 0];
-      if (!item) return;
-      if (item.type === "group") {
-        this.toggleGroup(item);
+      if (this.focusZone === "rows") {
+        const rows = this.visibleChannels();
+        const channel = rows[this.rowIndex || 0];
+        if (!channel) return;
+        if (this.rowFocusTarget === "star") {
+          // Toggling a favourite must never tune in.
+          this.toggleFavorite(channel.id);
+          return;
+        }
+        const node = this.container?.querySelector(`[data-row-index="${this.rowIndex}"]`);
+        this.tuneIn(node || { dataset: { channelId: String(channel.id || ""), channelTitle: channel.name || "" } }).catch?.((error) =>
+          reportLiveErrorSafe(error, "tuneIn")
+        );
         return;
       }
-      const channel = item.channel;
-      if (!channel) return;
-      if (this.rowFocusTarget === "star") {
-        // Toggling a favourite must never tune in.
-        this.toggleFavorite(channel.id);
-        return;
-      }
-      const node = this.container?.querySelector(`[data-flat-index="${this.flatIndex}"]`);
-      this.tuneIn(node || { dataset: { channelId: String(channel.id || ""), channelTitle: channel.name || "" } }).catch?.((error) =>
-        reportLiveErrorSafe(error, "tuneIn")
-      );
+      // Rail zone: activate the focused row.
+      this.activateRailRow();
     },
 
-    // Groups -----------------------------------------------------------------
-    // Enter on a group header toggles it. When the rows are already known the
-    // toggle is surgical (one insert/remove, no list re-render); otherwise the
-    // list repaints once and the channels load in the background.
-    toggleGroup(item) {
-      const groupId = String(item?.groupId ?? "");
-      if (!groupId) return;
-      const willExpand = !expandedGroupIdsRef().has(groupId);
-      if (willExpand) expandedGroupIdsRef().add(groupId);
-      else expandedGroupIdsRef().delete(groupId);
-      if (this.toggleGroupRowsInPlace(item, willExpand)) {
-        this.reindexFlatDom();
+    // Rail movement ----------------------------------------------------------
+    // One rail item per keypress: coalesce auto-repeats faster than the
+    // scroll animation, then reposition focus by toggling classes only
+    // (never a re-render).
+    moveRail(delta) {
+      const items = this.railItems();
+      if (!items.length) return;
+      const now = Date.now();
+      if (!shouldAcceptRepeatMove(this.lastRailMoveAt, now, MOVE_CADENCE_MS)) {
+        return;
+      }
+      this.lastRailMoveAt = now;
+      const next = clampIndex((this.railIndex || 0) + delta, items.length);
+      if (next === this.railIndex) return;
+      this.railIndex = next;
+      this.applyFocusState({ smooth: true });
+    },
+
+    // Rows movement ----------------------------------------------------------
+    moveRows(delta) {
+      const rows = this.visibleChannels();
+      if (!rows.length) return;
+      const now = Date.now();
+      if (!shouldAcceptRepeatMove(this.lastRowMoveAt, now, MOVE_CADENCE_MS)) {
+        return;
+      }
+      this.lastRowMoveAt = now;
+      const next = clampIndex((this.rowIndex || 0) + delta, rows.length);
+      if (next === this.rowIndex) return;
+      this.rowIndex = next;
+      this.rowFocusTarget = "row";
+      this.applyFocusState({ smooth: true });
+    },
+
+    // LEFT from a row (or UP past the first row) goes back to the rail at the
+    // currently selected row.
+    returnToRail() {
+      this.focusZone = "rail";
+      this.rowFocusTarget = "row";
+      const selectionIndex = this.railItems().findIndex((item) => item.railId === String(this.railSelection ?? ""));
+      if (selectionIndex >= 0) {
+        this.railIndex = selectionIndex;
+      }
+      this.applyFocusState({ smooth: true });
+    },
+
+    // Enter (or RIGHT) on the focused rail row.
+    activateRailRow() {
+      const items = this.railItems();
+      const item = items[this.railIndex || 0];
+      if (!item) return;
+      if (item.type === "source") {
+        this.toggleSource(item);
+        return;
+      }
+      if (item.type === "search") {
+        this.openSearch();
+        return;
+      }
+      this.selectRailItem(item.railId, { enterRows: true });
+    },
+
+    // Source headers ---------------------------------------------------------
+    // Enter on a source header toggles it. When the categories are known the
+    // toggle is surgical (one insert/remove, no panel re-render); otherwise
+    // the rail repaints once.
+    toggleSource(item) {
+      const railId = String(item?.railId ?? "");
+      if (!railId) return;
+      const willExpand = !collapsedSourceIdsRef().has(railId);
+      toggleSourceCollapsed(collapsedSourceIdsRef(), railId);
+      if (this.toggleSourceRowsInPlace(item, willExpand)) {
+        this.reindexRailDom();
         this.applyFocusState({ smooth: true });
         return;
       }
       this.updateRowsOnly();
-      if (willExpand) this.ensureGroupChannels(groupId);
     },
 
-    // Surgical toggle: insert/remove only the toggled group's rows. The
-    // header keeps its flat index (it precedes its own rows), so focus stays
-    // exactly where it is. Returns false when the cheap path is not possible.
-    toggleGroupRowsInPlace(item, willExpand) {
+    // Surgical toggle: insert/remove only the toggled source's category rows.
+    // The header keeps its rail index (it precedes its own rows), so focus
+    // stays exactly where it is. Returns false when the cheap path is not
+    // possible.
+    toggleSourceRowsInPlace(item, willExpand) {
       try {
         const container = this.container;
-        const selector = groupAttributeSelector("data-group-id", item?.groupId);
-        const header = container?.querySelector(`.live-group-header${selector}`);
+        const header = container?.querySelector(`.live-source-header[data-rail-id="${attributeEscape(item?.railId)}"]`);
         if (!header) return false;
         if (!willExpand) {
-          container.querySelectorAll(`.live-group-rows${selector}`).forEach((node) => node.remove());
+          // Remove every category row that follows this header until the next
+          // header (or the end of the rail).
+          let node = header.nextElementSibling;
+          while (node && !node.classList.contains("live-source-header")) {
+            const next = node.nextElementSibling;
+            if (node.classList.contains("live-rail-category")) node.remove();
+            node = next;
+          }
           header.setAttribute("aria-expanded", "false");
-          header.querySelector(".live-group-chevron")?.classList.remove("is-expanded");
+          const chevron = header.querySelector(".live-source-chevron");
+          if (chevron) {
+            chevron.textContent = "›";
+            chevron.classList.remove("is-expanded");
+          }
           return true;
         }
-        if (item.loading || !Array.isArray(item.channels) || !item.channels.length) {
-          return false; // rows unknown: full list repaint shows the loading state
+        const categories = Array.isArray(item?.categories) ? item.categories : [];
+        if (!categories.length) return false;
+        const fragment = document.createElement("template");
+        fragment.innerHTML = categories
+          .map((category, index) => {
+            const flatIndex = Number(header.dataset.railIndex || 0) + 1 + index;
+            return this.renderRailCategory(category, flatIndex);
+          })
+          .join("");
+        let anchor = header;
+        for (const row of Array.from(fragment.content.children)) {
+          anchor.insertAdjacentElement("afterend", row);
+          anchor = row;
         }
-        const wrapper = document.createElement("div");
-        wrapper.className = "live-group-rows";
-        wrapper.dataset.groupId = String(item.groupId);
-        wrapper.innerHTML = item.channels.map((channel) => this.renderChannelRow(channel)).join("");
-        header.insertAdjacentElement("afterend", wrapper);
         header.setAttribute("aria-expanded", "true");
-        header.querySelector(".live-group-chevron")?.classList.add("is-expanded");
+        const chevron = header.querySelector(".live-source-chevron");
+        if (chevron) {
+          chevron.textContent = "▾";
+          chevron.classList.add("is-expanded");
+        }
         return true;
       } catch (error) {
-        reportLiveErrorSafe(error, "toggleGroupRowsInPlace");
+        reportLiveErrorSafe(error, "toggleSourceRowsInPlace");
         return false;
       }
     },
 
-    // Loads a group's channels through the existing cache machinery and
-    // repaints the list exactly once when the cache arrives (the background
-    // load path itself does not repaint).
-    ensureGroupChannels(groupId) {
-      const key = String(groupId ?? "");
-      if (!key || key === internals.FAVORITES_CHIP_ID) return;
-      if (this.channelsByColumn?.has(key)) return;
-      void this.loadChannelsForCategory(key, { background: true });
-      const token = this.loadToken || 0;
-      const startedAt = Date.now();
-      const poll = () => {
-        this.groupPollTimer = 0;
-        if (token !== (this.loadToken || 0) || Router.getCurrent?.() !== "live") return;
-        if (this.channelsByColumn?.has(key)) {
-          this.updateRowsOnly();
-          return;
-        }
-        if (Date.now() - startedAt > 15000) return;
-        this.groupPollTimer = setTimeout(poll, 400);
-      };
-      this.groupPollTimer = setTimeout(poll, 400);
+    // Re-stamps data-rail-index over the live DOM order after a surgical
+    // source toggle so the flat focus model and the DOM never disagree.
+    reindexRailDom() {
+      const nodes = this.container?.querySelectorAll(".live-rail .focusable");
+      let index = 0;
+      nodes?.forEach((node) => {
+        node.dataset.railIndex = String(index);
+        index += 1;
+      });
     },
 
     // Search -----------------------------------------------------------------
     openSearch() {
       this.searchActive = true;
       this.searchQuery = "";
-      this.flatIndex = 0;
+      this.rowIndex = 0;
       this.rowFocusTarget = "row";
-      this.render();
+      this.refreshVisibleChannels();
       // Mounting the input and focusing it is what invites the TV system IME;
       // typing filters immediately even if a TV never shows the IME.
       const input = this.container?.querySelector(".live-search-input");
@@ -292,7 +378,7 @@ export function createLiveScreenMethods03() {
       field.dataset.liveBound = "1";
       field.addEventListener("input", () => {
         this.searchQuery = String(field.value || "");
-        this.flatIndex = 0;
+        this.rowIndex = 0;
         this.rowFocusTarget = "row";
         this.refreshVisibleChannels();
       });
@@ -309,10 +395,9 @@ export function createLiveScreenMethods03() {
     exitSearch() {
       this.searchActive = false;
       this.searchQuery = "";
-      this.flatIndex = 0;
+      this.rowIndex = 0;
       this.rowFocusTarget = "row";
-      this.focusZone = "header";
-      this.headerIndex = 0;
+      this.focusZone = "rail";
       this.refreshVisibleChannels();
       this.applyFocusState();
     },
@@ -324,16 +409,16 @@ export function createLiveScreenMethods03() {
       this.showNotice(t("live_guide_unavailable", {}, "La guía de programas necesita datos EPG y todavía no está disponible"));
     },
 
-    // Keep the focused node inside the list panel by the smallest movement
-    // that makes it fully visible, animated over a short ease so held keys
-    // never lag behind the scroll.
+    // Keep the focused node inside its panel (rail or channel list) by the
+    // smallest movement that makes it fully visible, animated over a short
+    // ease so held keys never lag behind the scroll.
     ensureFocusVisible({ smooth = true } = {}) {
       try {
         const focused = this.container?.querySelector(".focusable.focused");
         if (!focused) {
           return;
         }
-        const panel = focused.closest(".live-channel-list");
+        const panel = focused.closest(".live-rail, .live-channel-list");
         if (!panel) {
           return;
         }
@@ -456,6 +541,20 @@ export function createLiveScreenMethods03() {
         this.showNotice(`${t("live_tune_failed", {}, "Could not tune this channel")}: no stream URL`);
         return;
       }
+      // Vistos recientemente: persist a snapshot so the rail's recents row
+      // (and its rows) survive leaving and re-entering the screen.
+      try {
+        const rows = this.visibleChannels?.() || [];
+        const channel =
+          rows.find((entry) => String(entry?.id) === channelId) ||
+          (String(this.heroChannel?.id || "") === channelId ? this.heroChannel : null);
+        const snapshot = channel || { id: channelId, name: playerTitle };
+        this.recentChannels = internals.pushRecentChannel(this.recentChannels, snapshot);
+        internals.writeRecentChannels(this.recentChannels);
+        this.updateRowsOnly();
+      } catch (error) {
+        reportLiveErrorSafe(error, "pushRecentChannel");
+      }
       Router.navigate("player", {
         streamUrl: url,
         itemType: "channel",
@@ -511,10 +610,10 @@ export function createLiveScreenMethods03() {
   };
 }
 
-function groupAttributeSelector(attribute, value) {
+function attributeEscape(value) {
   const raw = String(value ?? "");
   const escaped = globalThis.CSS?.escape ? CSS.escape(raw) : raw.replace(/(["\\])/g, "\\$1");
-  return `[${attribute}="${escaped}"]`;
+  return escaped;
 }
 
 function focusWithoutAutoScrollSafe(node) {

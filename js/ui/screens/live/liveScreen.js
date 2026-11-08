@@ -26,19 +26,33 @@ export {
 // so the sibling method modules can reach them through `internals` and the
 // layout tests can import them directly.
 export {
-  ALL_CHIP_ID,
-  FAVORITES_CHIP_ID,
+  RAIL_SEARCH_ID,
+  RAIL_FAVORITES_ID,
+  RAIL_RECENTS_ID,
+  RAIL_ALL_ID,
+  categoryRailId,
+  sourceRailIdFromColumnId,
+  RECENTS_STORAGE_KEY,
+  MAX_RECENT_CHANNELS,
+  readRecentChannels,
+  writeRecentChannels,
+  pushRecentChannel,
+  buildRailItems,
+  collapsedSourceIdsRef,
+  isSourceExpanded,
+  toggleSourceCollapsed,
   FAVORITES_STORAGE_KEY,
   sourceNameFromChannelId,
   sourceNameFromColumnId,
-  formatChipLabel,
   formatChannelRowLabel,
   channelLogoInfo,
   normalizeSearchText,
   channelMatchesQuery,
   readFavoriteIds,
   writeFavoriteIds,
-  toggleFavoriteId
+  toggleFavoriteId,
+  clampIndex,
+  shouldAcceptRepeatMove
 } from "./liveScreenMethods-02-render.js";
 
 function isBackEvent(event) {
