@@ -23,6 +23,12 @@ const magisSessionPersistence = {
 
 export const LIVE_CHANNEL_ID_PREFIX = "magis:live:";
 
+// EPG contract (no guide UI yet): when an XMLTV guide eventually arrives it
+// attaches programmes to these channel objects by `epgChannelId`, falling back
+// to `tvgId`, and then to a normalized channel name. Magis publishes no
+// listings today, so both ids stay null here — the future guide only fills
+// them in and never has to reshape this model.
+
 // Stable id space for live channels inside the app: `magis:live:<code>`.
 export function liveChannelId(code) {
   return `${LIVE_CHANNEL_ID_PREFIX}${String(code || "")}`;
@@ -72,7 +78,7 @@ export function createLiveRepository({
     detail: String(detail || "unknown failure")
   });
 
-  function mapChannel(row = {}) {
+  function mapChannel(row = {}, { group = null, groupName = null } = {}) {
     const code = String(row?.code ?? "").trim();
     if (!code) return null;
     return {
@@ -80,8 +86,23 @@ export function createLiveRepository({
       code,
       name: String(row?.name ?? ""),
       number: row?.number ?? null,
-      logo: String(row?.logo ?? "")
+      logo: String(row?.logo ?? ""),
+      // EPG-ready fields: see the contract comment above LIVE_CHANNEL_ID_PREFIX.
+      epgChannelId: null,
+      tvgId: null,
+      group,
+      groupName
     };
+  }
+
+  // Resolves the display name for a category id from the in-memory categories
+  // cache only: listChannels never triggers a categories fetch of its own, so
+  // groupName is null when the categories have not been loaded yet. The Live
+  // screen always loads categories before channels, so this is the warm path.
+  function categoryForColumnId(columnId) {
+    const value =
+      categoriesCache && Array.isArray(categoriesCache.value) ? categoriesCache.value : [];
+    return value.find((entry) => String(entry?.columnId) === String(columnId)) || null;
   }
 
   function evictOverflow() {
@@ -123,7 +144,12 @@ export function createLiveRepository({
       // The client pages internally (100 per page, up to 5 pages, stopping at a
       // short page) and caches individual pages for its own 60 s TTL.
       const channels = await liveClient.listChannels({ columnId, signal });
-      const value = (Array.isArray(channels) ? channels : []).map(mapChannel).filter(Boolean);
+      const category = categoryForColumnId(key);
+      const value = (Array.isArray(channels) ? channels : [])
+        .map((row) =>
+          mapChannel(row, { group: category?.columnId ?? key, groupName: category?.name ?? null })
+        )
+        .filter(Boolean);
       channelCache.delete(key);
       channelCache.set(key, { value, expiresAt: now() + channelTtlMs });
       evictOverflow();
@@ -155,12 +181,27 @@ export function createLiveRepository({
     }
   }
 
+  // Cached lookup by channel id (prefixed `magislive`-style id or bare code).
+  // Serves the warm per-category cache only — it never resolves through the
+  // client — so an unknown (or not-yet-loaded) channel yields null.
+  function getChannel(id) {
+    const raw = String(id ?? "").trim();
+    const code = stripLiveChannelId(raw);
+    if (!code) return null;
+    for (const entry of channelCache.values()) {
+      if (!entry || entry.expiresAt <= now()) continue;
+      const found = entry.value.find((channel) => channel.code === code || channel.id === raw);
+      if (found) return found;
+    }
+    return null;
+  }
+
   function clearCaches() {
     categoriesCache = null;
     channelCache.clear();
   }
 
-  return { listCategories, listChannels, resolveChannel, clearCaches };
+  return { listCategories, listChannels, resolveChannel, getChannel, clearCaches };
 }
 
 // One repository instance per app: module-level caches survive leaving and

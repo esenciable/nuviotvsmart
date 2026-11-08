@@ -203,6 +203,35 @@ test("resolveChannel strips the magis:live: prefix and returns url+headers", asy
   assert.equal(fake.calls.resolveChannel[1]?.channelCode, "CCTV-2");
 });
 
+test("channel objects are EPG-ready and getChannel serves cached channels", async () => {
+  const fake = createFakeLiveClient({ pagesByColumn: standardPages() });
+  const repo = createLiveRepository({ live: fake.live });
+
+  // Warm the category cache so listChannels can stamp group/groupName from it.
+  await repo.listCategories();
+
+  const result = await repo.listChannels({ columnId: 101 });
+  assert.equal(result.status, "success");
+  const channel = result.data[0];
+
+  // The guide contract: Magis publishes no listings today, so both EPG ids are
+  // null, while the category link is stamped on every channel.
+  assert.equal(channel.epgChannelId, null);
+  assert.equal(channel.tvgId, null);
+  assert.equal(channel.group, 101);
+  assert.equal(channel.groupName, "News");
+
+  // getChannel is served from the per-category cache: no new client calls.
+  const pagesBefore = fake.calls.channelPages.length;
+  assert.equal(repo.getChannel(channel.id), channel);
+  assert.equal(fake.calls.channelPages.length, pagesBefore);
+
+  // An unknown id resolves to null without touching the client either.
+  assert.equal(repo.getChannel("magis:live:does-not-exist"), null);
+  assert.equal(repo.getChannel(""), null);
+  assert.equal(fake.calls.channelPages.length, pagesBefore);
+});
+
 test("a client rejection yields a status object and never throws", async () => {
   const fake = createFakeLiveClient();
   fake.failListCategories("portal unreachable");

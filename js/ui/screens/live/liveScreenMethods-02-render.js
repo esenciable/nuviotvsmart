@@ -16,10 +16,12 @@ export function createLiveScreenMethods02() {
       .live-category { display: block; width: 100%; text-align: left; background: transparent; border: 0; color: #cfcfd6; font-size: 20px; padding: 12px 24px; box-sizing: border-box; outline: none; cursor: pointer; }
       .live-category.selected { color: #ffffff; font-weight: 700; border-left: 4px solid var(--secondary-color, #f5f5f5); }
       .live-category.focused, .live-channel-card.focused { outline: 3px solid var(--secondary-color, #f5f5f5); outline-offset: -3px; background: rgba(255,255,255,0.10); }
+      .live-channel-card.focused { transform: scale(1.04); box-shadow: 0 0 0 6px rgba(255,255,255,0.18); }
       .live-main { flex: 1; height: 100%; display: flex; flex-direction: column; box-sizing: border-box; padding: 24px 32px; }
       .live-main-header { font-size: 24px; font-weight: 700; margin: 0 0 16px; }
+      .live-main-count { font-size: 16px; font-weight: 400; color: #9a9aa4; margin-left: 12px; }
       .live-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 16px; align-content: start; }
-      .live-channel-card { background: rgba(255,255,255,0.06); border-radius: 12px; padding: 12px; outline: none; cursor: pointer; display: flex; flex-direction: column; gap: 8px; box-sizing: border-box; }
+      .live-channel-card { background: rgba(255,255,255,0.06); border-radius: 12px; padding: 12px; outline: none; cursor: pointer; display: flex; flex-direction: column; gap: 8px; box-sizing: border-box; transition: transform 100ms ease; }
       .live-channel-logo { width: 100%; height: 84px; object-fit: contain; border-radius: 8px; background: rgba(0,0,0,0.35); }
       .live-channel-logo.placeholder { display: flex; align-items: center; justify-content: center; font-size: 30px; font-weight: 700; color: #cfcfd6; }
       .live-channel-name { font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -103,8 +105,14 @@ export function createLiveScreenMethods02() {
     },
 
     renderChannelGrid() {
-      const categoryName = this.categories.find((category) => String(category?.columnId) === String(this.selectedColumnId))?.name || "";
-      const header = `<h2 class="live-main-header">${escapeHtml(categoryName || t("live_channels_title", {}, "Channels"))}</h2>`;
+      const category = this.categories.find((category) => String(category?.columnId) === String(this.selectedColumnId));
+      const channelCount = Array.isArray(this.channels) ? this.channels.length : 0;
+      const countLabel = this.channelsLoading
+        ? ""
+        : `<span class="live-main-count">${escapeHtml(t("live_channel_count", { count: channelCount }, "{{count}} channels"))}</span>`;
+      const header = `<h2 class="live-main-header">${escapeHtml(
+        category?.name || t("live_channels_title", {}, "Channels")
+      )}${countLabel}</h2>`;
 
       if (this.channelsLoading) {
         return `

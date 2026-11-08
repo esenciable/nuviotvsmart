@@ -40,6 +40,7 @@ export function createLibraryScreenMethods07() {
         action === "gotoSearch" ||
         action === "gotoDiscover" ||
         action === "gotoLibrary" ||
+        action === "gotoLive" ||
         action === "gotoPlugin" ||
         action === "gotoSettings" ||
         action === "gotoAccount"
