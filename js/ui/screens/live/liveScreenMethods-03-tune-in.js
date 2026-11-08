@@ -18,8 +18,11 @@ export function createLiveScreenMethods03() {
       }
       const code = Number(event?.keyCode || 0);
       // Reuse the shared dpad helper: geometry-based movement across the rail
-      // and the grid, no bespoke focus model.
+      // and the grid, no bespoke focus model. The shared helper moves focus with
+      // focusWithoutDocumentScroll and only scrolls on VIDAA, so on this TV the
+      // focused card could leave the viewport; keep it visible ourselves.
       if (code >= 37 && code <= 40 && ScreenUtils.handleDpadNavigation(event, this.container, ".focusable")) {
+        this.ensureFocusVisible();
         this.rememberFocus();
         return;
       }
@@ -35,6 +38,38 @@ export function createLiveScreenMethods03() {
         this.selectCategory(current.dataset.columnId);
       } else if (action === "tuneIn") {
         void this.tuneIn(current);
+      }
+    },
+
+    // Keep the focused node inside its own scroll panel. Scrolls only the panel
+    // that owns it (the rail or the grid), never the document, and by the
+    // smallest amount that makes it fully visible.
+    ensureFocusVisible({ smooth = true } = {}) {
+      const focused = this.container?.querySelector(".focusable.focused");
+      if (!focused) {
+        return;
+      }
+      const panel = focused.closest(".live-grid") || focused.closest(".live-rail");
+      if (!panel) {
+        return;
+      }
+      const panelRect = panel.getBoundingClientRect();
+      const rect = focused.getBoundingClientRect();
+      const margin = 16;
+      let delta = 0;
+      if (rect.top < panelRect.top + margin) {
+        delta = rect.top - panelRect.top - margin;
+      } else if (rect.bottom > panelRect.bottom - margin) {
+        delta = rect.bottom - panelRect.bottom + margin;
+      }
+      if (!delta) {
+        return;
+      }
+      const top = panel.scrollTop + delta;
+      if (typeof panel.scrollTo === "function") {
+        panel.scrollTo({ top, behavior: smooth ? "smooth" : "auto" });
+      } else {
+        panel.scrollTop = top;
       }
     },
 

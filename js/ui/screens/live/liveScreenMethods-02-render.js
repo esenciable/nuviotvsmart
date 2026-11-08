@@ -56,10 +56,12 @@ export function createLiveScreenMethods02() {
           });
           target.classList.add("focused");
           focusWithoutAutoScrollSafe(target);
+          this.ensureFocusVisible?.({ smooth: false });
           return;
         }
       }
       ScreenUtils.setInitialFocus(this.container);
+      this.ensureFocusVisible?.({ smooth: false });
     },
 
     renderCategoriesRail() {
