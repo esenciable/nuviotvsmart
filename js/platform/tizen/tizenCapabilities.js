@@ -196,8 +196,13 @@ export const TizenCapabilities = {
   },
 
   canUsePlugins(runtime = globalThis) {
+    // FORK PATCH: the upstream hides the whole plugin section when Tizen's major version is below
+    // its threshold, and the version detection is not reliable on every firmware (this The Frame
+    // reports a version the check rejects while the packaged PluginService is present and running).
+    // The plugin runtime needs WebAssembly plus that service, so gate on those, not on a number.
     const capabilities = getTizenCapabilities(runtime);
-    return !capabilities.isTizen || capabilities.tizenPluginVersionSupported;
+    if (!capabilities.isTizen) return true;
+    return Boolean(capabilities.hasWebAssembly) || capabilities.tizenPluginVersionSupported;
   },
 
   isP2pUnsupported(runtime = globalThis) {
