@@ -692,6 +692,88 @@ export function channelSpacerHeights({ start, end, total } = {}) {
 // instead of queuing behind the scroll animation. A repeat faster than the
 // cadence is dropped.
 
+// Background release (Samsung memory guide) --------------------------------
+// On document.visibilitychange -> hidden, a mounted Live TV screen releases
+// everything the return path can rebuild and keeps only light state, because
+// Samsung documents a 120 MB cap for Tizen apps and KILLS processes that
+// exceed the system memory budget. These helpers are pure so node --test pins
+// the plan: which per-category caches are dropped and which are kept, the
+// retained light state shape, and the restore plan (refetched vs reused).
+
+// Pure: the background cache release plan. Every cached per-category channel
+// list is REBUILDABLE (one portal call) except the one behind the currently
+// selected rail row, which is kept so the return repaint feels instant. A
+// non-category selection (favourites, recents, search) reads the UNION of the
+// caches, so no single cache is "the current one" and all of them drop.
+export function planBackgroundCacheRelease({ channelsByColumn = new Map(), railSelection = "" } = {}) {
+  const caches = channelsByColumn instanceof Map ? channelsByColumn : new Map();
+  const selection = String(railSelection ?? "");
+  const selectedColumnId = selection.startsWith("cat:") ? selection.slice(4) : null;
+  const keep = [];
+  const drop = [];
+  for (const key of caches.keys()) {
+    const columnId = String(key);
+    if (selectedColumnId != null && columnId === selectedColumnId) keep.push(columnId);
+    else drop.push(columnId);
+  }
+  return { keep, drop, selectedColumnId };
+}
+
+// Pure: the LIGHT state a release retains — the fields that make the return
+// feel instant (rail selection id, focused rail row by identity, focused
+// channel row and its target, scroll position, search query and keyboard
+// index, favourites, recents). The arrays are COPIED so the snapshot can
+// never alias live state, and heavy state (the channel lists, the caches, the
+// categories) is never included. `scrollTop` is the channel list's scroll
+// position at release time, read by the caller.
+export function retainedLightState(screen, { scrollTop = 0 } = {}) {
+  const favoriteIds = Array.isArray(screen?.favoriteIds) ? screen.favoriteIds : [];
+  const recentChannels = Array.isArray(screen?.recentChannels) ? screen.recentChannels : [];
+  return {
+    railSelection: String(screen?.railSelection ?? ""),
+    railFocusId: String(screen?.railFocusId ?? ""),
+    railIndex: Math.max(0, Math.trunc(Number(screen?.railIndex) || 0)),
+    rowIndex: Math.max(0, Math.trunc(Number(screen?.rowIndex) || 0)),
+    rowFocusTarget: String(screen?.rowFocusTarget || "row"),
+    focusZone: String(screen?.focusZone || "rail"),
+    searchActive: Boolean(screen?.searchActive),
+    searchQuery: String(screen?.searchQuery ?? ""),
+    keyboardIndex: Math.max(0, Math.trunc(Number(screen?.keyboardIndex) || 0)),
+    favoriteIds: favoriteIds.map((id) => String(id)),
+    recentChannels: recentChannels.map((entry) => ({ ...entry })),
+    scrollTop: Math.max(0, Math.trunc(Number(scrollTop) || 0))
+  };
+}
+
+// Pure: the foreground restore plan. The selected category is refetched from
+// the network exactly when its cache was dropped; a cache that survived is
+// reused; favourites/recents/search repaint from whatever caches remain while
+// the re-armed preload refetches the dropped ones. The preload is re-armed
+// only when something was actually dropped.
+export function planForegroundRestore({ railSelection = "", cachedColumnIds = [], droppedColumnIds = [] } = {}) {
+  const cached = new Set((Array.isArray(cachedColumnIds) ? cachedColumnIds : []).map((id) => String(id)));
+  const dropped = (Array.isArray(droppedColumnIds) ? droppedColumnIds : []).map((id) => String(id));
+  const selection = String(railSelection ?? "");
+  if (selection.startsWith("cat:")) {
+    const columnId = selection.slice(4);
+    const selectionWasDropped = !cached.has(columnId);
+    return {
+      selectedColumnId: columnId,
+      selectionWasDropped,
+      refetchColumnIds: selectionWasDropped ? [columnId] : [],
+      reuseColumnIds: Array.from(cached),
+      rearmPreload: dropped.length > 0
+    };
+  }
+  return {
+    selectedColumnId: null,
+    selectionWasDropped: dropped.length > 0,
+    refetchColumnIds: dropped,
+    reuseColumnIds: Array.from(cached),
+    rearmPreload: dropped.length > 0
+  };
+}
+
 // Rendering ----------------------------------------------------------------
 
 export function createLiveScreenMethods02() {
@@ -1529,6 +1611,9 @@ export function createLiveScreenMethods02() {
         }
         if (!list.dataset.virtualScrollBound) {
           list.dataset.virtualScrollBound = "true";
+          // Removal is guaranteed by cleanup(): it explicitly removes this
+          // handler from the live list node (same memoized function ref), so
+          // a teardown can never leak the binding.
           list.addEventListener("scroll", this.channelListScrollHandler(), { passive: true });
         }
         this.syncChannelWindow({
@@ -1548,7 +1633,11 @@ export function createLiveScreenMethods02() {
       if (!this.container) return;
       try {
         const list = this.container.querySelector(".live-channel-list");
-        const previousScrollTop = list?.scrollTop ?? 0;
+        // When the current list is the windowed one, its scrollTop is the
+        // position to keep across the refresh. When it is NOT (loading / error
+        // panel — e.g. a foreground restore refetching a released selection),
+        // a pending scroll restore is preserved instead of overwritten with 0.
+        const previousScrollTop = list?.hasAttribute?.("data-virtual-list") ? (list?.scrollTop ?? 0) : (this._virtualPendingScrollTop ?? 0);
         const temp = document.createElement("div");
         temp.innerHTML = `
           ${this.renderHero()}

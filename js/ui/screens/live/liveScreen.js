@@ -72,7 +72,10 @@ export {
   rememberLiveSelection,
   readRememberedLiveSelection,
   forgetLiveSelection,
-  resolveLiveSelectionRestore
+  resolveLiveSelectionRestore,
+  planBackgroundCacheRelease,
+  retainedLightState,
+  planForegroundRestore
 } from "./liveScreenMethods-02-render.js";
 
 function isBackEvent(event) {

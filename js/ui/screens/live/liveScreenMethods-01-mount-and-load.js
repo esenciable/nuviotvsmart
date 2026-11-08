@@ -8,6 +8,16 @@ function clampRowIndexValue(index, length) {
   return Math.min(max, Math.max(0, value));
 }
 
+// The current route, safe when the Router stub has no getCurrent (tests).
+// Never throws; a missing Router reads as "not on the live screen".
+function currentRouteSafe(router) {
+  try {
+    return typeof router?.getCurrent === "function" ? router.getCurrent() : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // Mount and data loading for the reference layout: the screen renders its
 // skeleton immediately, then paints the left rail and the first category's
 // channels as soon as they arrive, while the remaining categories preload in
@@ -54,6 +64,26 @@ export function createLiveScreenMethods01() {
       this.resolveController = null;
       this.noticeTimer = 0;
       this.heroChannel = null; // hidden until a channel row is focused
+
+      // Background release state (Samsung memory guide). ONE AbortController
+      // per mount owns the document listeners this screen binds (the
+      // visibilitychange handler here); cleanup() aborts it, so a teardown
+      // can never leak a listener. The channel list's scroll listener is
+      // removed explicitly in cleanup() (same memoized function ref).
+      this._liveMounted = true;
+      this._releasedForBackground = false;
+      this._backgroundRetained = null;
+      this._backgroundDroppedColumnIds = [];
+      this._mountListeners = typeof AbortController === "function" ? new AbortController() : null;
+      if (this._mountListeners && typeof document !== "undefined" && document?.addEventListener) {
+        document.addEventListener(
+          "visibilitychange",
+          () => {
+            this.handleVisibilityChange?.();
+          },
+          { signal: this._mountListeners.signal }
+        );
+      }
 
       // Deterministic focus state: which zone (hero actions / left rail /
       // channel rows) plus explicit indices. Never derived from geometry.
@@ -319,12 +349,21 @@ export function createLiveScreenMethods01() {
         if (token !== this.loadToken || Router.getCurrent() !== "live") {
           return;
         }
+        // Hidden screen: the background release owns the pending work now —
+        // stop queueing more portal calls.
+        if (this._releasedForBackground) {
+          return;
+        }
         const columnId = category?.columnId;
         if (columnId == null || this.channelsByColumn.has(String(columnId))) {
           continue;
         }
         const result = await liveRepository.listChannels({ columnId });
         if (token !== this.loadToken || Router.getCurrent() !== "live") {
+          return;
+        }
+        if (this._releasedForBackground) {
+          // Went dark mid-flight: do not rebuild state into a released screen.
           return;
         }
         if (result.status === "success" && !this.channelsByColumn.has(String(columnId))) {
@@ -414,8 +453,145 @@ export function createLiveScreenMethods01() {
       if (this.rowIndex < 0) this.rowIndex = 0;
     },
 
+    // Background release / foreground restore (Samsung memory guide) --------
+    // The visibility listener is bound in mount() with the mount AbortController
+    // and dies with it in cleanup(); these handlers do the release and restore.
+
+    handleVisibilityChange() {
+      try {
+        if (typeof document === "undefined" || !document) return;
+        if (document.hidden) {
+          this.releaseForBackground();
+        } else {
+          this.restoreFromBackground();
+        }
+      } catch (_) {
+        // A release/restore failure must never break the screen; the next
+        // foreground interaction repaints from the retained state.
+      }
+    },
+
+    // Drops every cached per-category channel list except the currently
+    // selected one and invalidates the memoized ownership map. Returns the
+    // release plan (the dropped column ids drive the restore refetch).
+    dropBackgroundCaches() {
+      const plan = internals.planBackgroundCacheRelease({
+        channelsByColumn: this.channelsByColumn,
+        railSelection: this.railSelection
+      });
+      for (const columnId of plan.drop) {
+        this.channelsByColumn.delete(columnId);
+      }
+      // The ownership memo's signature is the cache key list: force a
+      // recompute from the kept caches.
+      this._ownershipSignature = null;
+      this._categoryOwnership = null;
+      return plan;
+    },
+
+    // visibilitychange -> hidden: release everything rebuildable, keep only
+    // the light state. Not mounted => nothing at all; the Router already left
+    // => a no-op beyond clearing the rebuildable caches (the Router's cleanup
+    // owns the teardown — no DOM, no timer, no focus work here).
+    releaseForBackground() {
+      if (!this._liveMounted) return;
+      if (currentRouteSafe(Router) !== "live") {
+        this.dropBackgroundCaches();
+        return;
+      }
+      // Timers and pending polls this screen owns.
+      this.clearNoticeTimer();
+      this.categoryLoadController?.abort?.();
+      this.categoryLoadController = null;
+      this._releasedForBackground = true; // stops the preload loop and late results
+      // Per-category caches except the currently selected one.
+      const plan = this.dropBackgroundCaches();
+      this._backgroundDroppedColumnIds = plan.drop;
+      // The virtual pool's row content: empty every recycled row node so its
+      // subtree and per-node data can be collected; the window sync refills
+      // the pool on return. The spacers stay, so the scroll height (and with
+      // it the scroll position) survives untouched.
+      this._virtualWindow = null;
+      const list = this.container?.querySelector('.live-channel-list[data-virtual-list="true"]');
+      const scrollTop = list?.scrollTop || 0;
+      list?.querySelectorAll(".live-channel-row").forEach((node) => {
+        node.innerHTML = "";
+      });
+      // The light state that makes the return feel instant. this.channels is
+      // the rendered COPY of the released caches — rebuildable, so it goes
+      // too; favourites, recents, search query, focus and selection stay.
+      this.channels = [];
+      this._backgroundRetained = internals.retainedLightState(this, { scrollTop });
+    },
+
+    // visibilitychange -> visible: restore. Repaints the current selection
+    // from the network exactly when its cache was dropped, re-applies the
+    // retained rail selection / row focus / scroll position and re-arms the
+    // preload for everything that was dropped.
+    restoreFromBackground() {
+      if (!this._liveMounted || currentRouteSafe(Router) !== "live") return;
+      if (!this._releasedForBackground) return; // nothing was released
+      this._releasedForBackground = false;
+      const retained = this._backgroundRetained;
+      const droppedColumnIds = Array.isArray(this._backgroundDroppedColumnIds) ? this._backgroundDroppedColumnIds : [];
+      this._backgroundRetained = null;
+      this._backgroundDroppedColumnIds = [];
+      if (retained) {
+        // Re-apply the retained light state (the fields never mutated while
+        // hidden, but the snapshot is authoritative).
+        this.railSelection = retained.railSelection || this.railSelection || null;
+        this.railFocusId = retained.railFocusId || this.railFocusId;
+        this.railIndex = retained.railIndex;
+        this.rowIndex = retained.rowIndex;
+        this.rowFocusTarget = retained.rowFocusTarget;
+        this.focusZone = retained.focusZone;
+        this.searchActive = retained.searchActive;
+        this.searchQuery = retained.searchQuery;
+        this.keyboardIndex = retained.keyboardIndex;
+        // The scroll position is restored by prepareChannelWindow when the
+        // list repaints (the pending value survives the loading render too).
+        this._virtualPendingScrollTop = retained.scrollTop;
+      }
+      const plan = internals.planForegroundRestore({
+        railSelection: this.railSelection,
+        cachedColumnIds: Array.from(this.channelsByColumn?.keys?.() || []),
+        droppedColumnIds
+      });
+      if (plan.selectionWasDropped && plan.selectedColumnId) {
+        // Refetch the selection first; the repaint (and with it the focus and
+        // scroll restore) happens when the list lands. Only then is the
+        // preload re-armed, so an early cache arrival can never bounce the
+        // retained row focus off the still-empty list.
+        void this.loadChannelsForCategory(plan.selectedColumnId, { background: false }).then(() => {
+          if (plan.rearmPreload && this._liveMounted && !this._releasedForBackground) {
+            void this.preloadRemainingCategories(this.loadToken);
+          }
+        });
+      } else {
+        this.refreshVisibleChannels();
+        this.applyFocusState?.();
+        if (plan.rearmPreload) {
+          void this.preloadRemainingCategories(this.loadToken);
+        }
+      }
+    },
+
     cleanup() {
       this.loadToken = (this.loadToken || 0) + 1;
+      this._liveMounted = false;
+      this._releasedForBackground = false;
+      this._backgroundRetained = null;
+      this._backgroundDroppedColumnIds = [];
+      // Abort the mount's listeners: the visibilitychange handler dies here
+      // with its AbortController, and the channel list's scroll listener is
+      // removed explicitly from the live node (same memoized function ref),
+      // so a teardown can never leak a listener.
+      this._mountListeners?.abort?.();
+      this._mountListeners = null;
+      const boundList = this.container?.querySelector('.live-channel-list[data-virtual-list="true"]');
+      if (boundList && this._onChannelListScroll) {
+        boundList.removeEventListener("scroll", this._onChannelListScroll);
+      }
       // Remember WHERE the user was before the screen goes away (player visit,
       // or leaving Live TV entirely) so the next mount restores the spot.
       rememberLiveSelection({ railId: this.railSelection, rowIndex: this.rowIndex });
