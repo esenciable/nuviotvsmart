@@ -12,6 +12,7 @@ import {
   emitPluginDiagnosticEvent,
   emitPluginServiceDiagnostics
 } from "../core/diagnostics/pluginDiagnostics.js";
+import { sendRuntimeBeacon } from "../core/diagnostics/runtimeBeacon.js";
 
 let cachedHealth = null;
 let cachedHealthAt = 0;
@@ -247,6 +248,14 @@ async function directBrowserFetch(request) {
   return normalizeResponse(await fetchBrowserPluginRequest(request), request.url);
 }
 
+async function ensureReadyInternal(client, { force = false } = {}) {
+  if (!areTizenPluginsSupported()) {
+    return unsupportedTizenPluginResult();
+  }
+  const health = await client.health({ force });
+  return assertCompatibleHealth(health);
+}
+
 export const PluginServiceClient = {
   getService() {
     return serviceForPlatform();
@@ -307,11 +316,26 @@ export const PluginServiceClient = {
   },
 
   async ensureReady({ force = false } = {}) {
-    if (!areTizenPluginsSupported()) {
-      return unsupportedTizenPluginResult();
-    }
-    const health = await this.health({ force });
-    return assertCompatibleHealth(health);
+    // Disposable runtime beacon: report the readiness outcome to a LAN
+    // listener without altering the returned value, thrown error, caching or
+    // timing. The observer never rethrows, so the caller's promise is untouched.
+    const promise = ensureReadyInternal(this, { force });
+    promise.then(
+      (health) =>
+        sendRuntimeBeacon({
+          phase: "service",
+          ok: true,
+          detail: String(health?.detail || health?.status || "")
+        }),
+      (error) =>
+        sendRuntimeBeacon({
+          phase: "service",
+          ok: false,
+          error: String(error?.message || error),
+          detail: String(error?.detail || "")
+        })
+    );
+    return promise;
   },
 
   startLifecycleMonitor() {

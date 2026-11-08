@@ -34,6 +34,7 @@ import { shouldShowUpdate } from "./core/update/updateBannerPolicy.js";
 import { showAppUpdatePrompt } from "./ui/components/appUpdatePrompt.js";
 import { resolveExperienceRoute } from "./core/profile/experienceModeRouting.js";
 import { PluginRuntime } from "./core/player/pluginRuntime.js";
+import { getPluginCapabilitySnapshot } from "./core/player/pluginPolicy.js";
 import { installPartyEffects } from "./ui/screens/party/partyEffects.js";
 
 // These legacy Web-only overrides are no longer user settings. Navigation now
@@ -513,6 +514,22 @@ function setupTizenPlaybackLifecycle() {
   });
 }
 
+function startPluginRuntimeSelfTest() {
+  try {
+    // Fire-and-forget runtime probe: report the plugin worker outcome on
+    // every app start (the LAN diagnostic beacon listens for it) instead of
+    // only when the Plugins screen mounts. Optional diagnostics must never
+    // fail or delay application bootstrap.
+    const quota = getPluginCapabilitySnapshot().quota;
+    void PluginRuntime.selfTest(quota ? { quota } : undefined).catch(() => {
+      // The runtime beacon owns outcome reporting; a rejected self-test is
+      // expected on runtimes without Worker/WebAssembly support.
+    });
+  } catch (_) {
+    // Capability probing must never break bootstrap.
+  }
+}
+
 function setupPluginRuntimeLifecycle() {
   const cancel = () => PluginRuntime.cancelAll();
   document.addEventListener("visibilitychange", () => {
@@ -584,6 +601,10 @@ async function bootstrapApp() {
       // path. A failed optional service must not fail application bootstrap.
     });
   }
+  // Probe the JS plugin worker runtime on every start, including Tizen
+  // versions where the packaged WRT plugin service is unavailable: the worker
+  // runtime and the network service are independent capabilities.
+  startPluginRuntimeSelfTest();
   applyPerformanceMode();
   markBootStage("Loading language resources");
   await I18n.init();

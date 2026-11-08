@@ -9,6 +9,7 @@ import {
   emitPluginDiagnostic,
   emitPluginDiagnosticEvent
 } from "../diagnostics/pluginDiagnostics.js";
+import { sendRuntimeBeacon } from "../diagnostics/runtimeBeacon.js";
 
 const activeWorkers = new Set();
 const activeCancellers = new Map();
@@ -40,6 +41,25 @@ function defaultArgs({ tmdbId, mediaType, season = null, episode = null } = {}) 
     episode: episode == null ? null : Number(episode)
   };
 }
+
+async function selfTestInternal(client, { quota = PLUGIN_QUOTAS.limited } = {}) {
+    if (typeof Worker !== "function") throw new Error("Worker API unavailable");
+    if (typeof WebAssembly !== "object") throw new Error("WebAssembly API unavailable");
+    if (!runtimeTestPromise) {
+      runtimeTestPromise = client.executePlugin({
+        code: "module.exports.getStreams = function(){ return []; };",
+        filename: "runtime-self-test.js",
+        scraperId: "runtime-self-test",
+        args: { tmdbId: "", mediaType: "movie", season: null, episode: null },
+        quota,
+        skipService: true
+      }).catch((error) => {
+        runtimeTestPromise = null;
+        throw error;
+      });
+    }
+    return runtimeTestPromise;
+  }
 
 export const PluginRuntime = {
   listSources() {
@@ -84,23 +104,23 @@ export const PluginRuntime = {
     return [];
   },
 
-  async selfTest({ quota = PLUGIN_QUOTAS.limited } = {}) {
-    if (typeof Worker !== "function") throw new Error("Worker API unavailable");
-    if (typeof WebAssembly !== "object") throw new Error("WebAssembly API unavailable");
-    if (!runtimeTestPromise) {
-      runtimeTestPromise = this.executePlugin({
-        code: "module.exports.getStreams = function(){ return []; };",
-        filename: "runtime-self-test.js",
-        scraperId: "runtime-self-test",
-        args: { tmdbId: "", mediaType: "movie", season: null, episode: null },
-        quota,
-        skipService: true
-      }).catch((error) => {
-        runtimeTestPromise = null;
-        throw error;
-      });
-    }
-    return runtimeTestPromise;
+  selfTest(options = {}) {
+    const promise = selfTestInternal(this, options);
+    // Disposable runtime beacon: report the worker self-test outcome to a LAN
+    // listener without altering the returned promise. selfTest computes no
+    // version/health detail of its own, so detail stays empty. The observer
+    // never rethrows, so the caller's promise is untouched.
+    promise.then(
+      () => sendRuntimeBeacon({ phase: "worker", ok: true, detail: "" }),
+      (error) =>
+        sendRuntimeBeacon({
+          phase: "worker",
+          ok: false,
+          error: String(error?.message || error),
+          detail: ""
+        })
+    );
+    return promise;
   },
 
   async executePlugin({

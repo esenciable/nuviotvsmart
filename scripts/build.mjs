@@ -574,6 +574,11 @@ async function buildPluginRuntimeAssets() {
     minify: !debugBundle,
     legalComments: "none"
   });
+  // The worker is loaded standalone via new Worker(url) on TV runtimes
+  // (Tizen 5.x / Chromium 69) where `globalThis` does not exist (shipped in
+  // Chromium 71) and no core-js polyfill runs. Define it from `self` before
+  // any module statement evaluates. Assignment form, not `var globalThis`, so
+  // the `typeof globalThis` feature test inside pluginWorker.js still works.
   await build({
     entryPoints: [path.join(rootDir, "js", "core", "player", "pluginWorker.js")],
     outfile: path.join(distDir, "assets", "runtime", "plugin-worker.js"),
@@ -583,6 +588,9 @@ async function buildPluginRuntimeAssets() {
     target: [`chrome${compatibilityPolicy.chromiumVersion}`],
     minify: !debugBundle,
     legalComments: "none",
+    banner: {
+      js: 'typeof self!=="undefined"&&(self.globalThis=self);'
+    },
     define: {
       __NUVIO_CRYPTO_JS_SOURCE__: JSON.stringify(cryptoJsSource)
     }
@@ -728,4 +736,15 @@ async function runBuild() {
   }
 }
 
-runBuild();
+const workerOnly = process.argv.includes("--plugin-worker-only");
+if (workerOnly) {
+  try {
+    await buildPluginRuntimeAssets();
+  } catch (error) {
+    console.error("plugin worker build failed:");
+    console.error(error);
+    process.exit(1);
+  }
+} else {
+  runBuild();
+}
