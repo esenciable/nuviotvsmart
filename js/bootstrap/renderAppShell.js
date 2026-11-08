@@ -6,6 +6,7 @@ const APP_SHELL = `
     <div id="essentialAddonSetup" class="screen"></div>
     <div id="home" class="screen"></div>
     <div id="live" class="screen"></div>
+    <div id="sports" class="screen"></div>
     <div id="detail" class="screen"></div>
     <div id="stream" class="screen"></div>
     <div id="castDetail" class="screen"></div>

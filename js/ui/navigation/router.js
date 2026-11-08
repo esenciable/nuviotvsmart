@@ -1,5 +1,6 @@
 import { HomeScreen } from "../screens/home/homeScreen.js";
 import { LiveScreen } from "../screens/live/liveScreen.js";
+import { SportsScreen } from "../screens/sports/sportsScreen.js";
 import { PlayerScreen } from "../screens/player/playerScreen.js";
 import { AccountScreen } from "../screens/account/accountScreen.js";
 import { AuthQrSignInScreen } from "../screens/account/authQrSignInScreen.js";
@@ -41,6 +42,7 @@ export {
   Router,
   HomeScreen,
   LiveScreen,
+  SportsScreen,
   PlayerScreen,
   AccountScreen,
   AuthQrSignInScreen,
@@ -169,6 +171,7 @@ Object.assign(Router, {
   routes: {
     home: HomeScreen,
     live: LiveScreen,
+    sports: SportsScreen,
     player: PlayerScreen,
     account: AccountScreen,
     authQrSignIn: AuthQrSignInScreen,
