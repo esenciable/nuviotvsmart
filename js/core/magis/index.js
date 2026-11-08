@@ -118,6 +118,9 @@ export async function createMagisVodClient({
     vod,
     live,
     proxyUrl: resolvedProxyUrl,
-    resolveStream: vod.resolveStream
+    resolveStream: vod.resolveStream,
+    // Re-authenticate in place after aaa100027/aaa100028 without minting a new
+    // device: callers retry the failed operation once after this resolves.
+    refreshSession: () => session.refresh()
   };
 }

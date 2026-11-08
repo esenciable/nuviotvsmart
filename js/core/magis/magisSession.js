@@ -140,5 +140,49 @@ export function createMagisSession({ portal, config, persistence = {}, random, c
     }
   }
 
-  return { activate, getOrCreate, clear, fingerprint };
+  // Measured against the live portal: an expired or invalid token answers
+  // aaa100027 (expired) / aaa100028 (not logged in), and v8/active with an EMPTY
+  // snToken plus the stored sn returns the SAME userId with a fresh token. That is
+  // what the Kotlin client relies on, and it keeps the device identity stable.
+  async function reactivate(sn) {
+    if (!sn) {
+      return activate();
+    }
+    const active = await portal.call("v8/active", {
+      snToken: "",
+      authVersion: "",
+      authCode: "",
+      preCode: "",
+      macAddr: "02:00:00:00:00:00",
+      reserve1: "",
+      openNum: 4,
+      channel: "default",
+      matadata: "",
+      signdata: "",
+      ...fingerprint,
+      ...createDeviceDict(config, String(sn))
+    });
+    if (!active?.userToken) {
+      throw new Error("magisSession: reactivation failed (no userToken in answer)");
+    }
+    const state = {
+      userId: String(active.userId ?? ""),
+      userToken: String(active.userToken),
+      sn: String(sn)
+    };
+    if (typeof persistence.save === "function") {
+      persistence.save(state);
+    }
+    return state;
+  }
+
+  // Re-authenticate with the stored identity, minting a new one only when no sn
+  // was ever persisted.
+  async function refresh() {
+    const saved = persistence.load?.();
+    const sn = saved && typeof saved === "object" ? String(saved.sn || "") : "";
+    return reactivate(sn);
+  }
+
+  return { activate, reactivate, refresh, getOrCreate, clear, fingerprint };
 }
