@@ -12,6 +12,12 @@ import {
   stablePluginHash
 } from "../../core/player/pluginModels.js";
 import { ProfileManager } from "../../core/profile/profileManager.js";
+import { LocalStore } from "../../core/storage/localStore.js";
+import { metaRepository } from "./metaRepository.js";
+import {
+  MAGIS_STREAM_SOURCE_ID,
+  createMagisStreamSource
+} from "../../core/magis/magisStreamSource.js";
 import { TmdbService } from "../../core/tmdb/tmdbService.js";
 import { LocalDebridAvailabilityService } from "../../core/debrid/localDebridAvailabilityService.js";
 import { DebridStreamPresentation } from "../../core/debrid/directDebridStreamPresentation.js";
@@ -21,6 +27,49 @@ import { StreamSearchSessionCache } from "./streamSearchSessionCache.js";
 
 const STREAM_SOURCE_REQUEST_TIMEOUT_MS = 60_000;
 const PLUGIN_STREAM_REQUEST_TIMEOUT_MS = 120_000;
+// Magis VOD resolution (config load + session + search + CDN probing) is
+// bounded so it can never hold the final source result open indefinitely;
+// its group is emitted progressively whenever it is ready.
+const MAGIS_STREAM_RESOLUTION_TIMEOUT_MS = 45_000;
+
+// Magis session persistence through the caller: a namespaced localStorage key
+// so the session mints once and is reused across stream screens and restarts.
+const MAGIS_SESSION_STORAGE_KEY = "nuvio.magis.session.v1";
+const magisSessionPersistence = {
+  load: () => LocalStore.get(MAGIS_SESSION_STORAGE_KEY, null),
+  save: (state) => LocalStore.set(MAGIS_SESSION_STORAGE_KEY, state),
+  clear: () => LocalStore.remove(MAGIS_SESSION_STORAGE_KEY)
+};
+
+// Title resolution for Magis reuses the app's existing meta facility (no new
+// TMDB client): metaRepository already resolves meta across installed addons
+// with caching. Magis searches by title, so extract { title, year, isSeries }.
+async function magisTitleLookup(videoId, type) {
+  const rawId = String(videoId || "").trim();
+  if (!rawId) return null;
+  const contentId = streamRepository.buildContentLevelMetaId(rawId);
+  const result = await metaRepository.getMetaFromAllAddons(type, contentId);
+  if (result?.status !== "success" || !result?.data) return null;
+  const meta = result.data;
+  const title = String(meta.name || "").trim();
+  if (!title) return null;
+  const year = String(meta.releaseInfo || "").match(/\d{4}/)?.[0] || null;
+  const metaType = String(meta.type || type || "")
+    .trim()
+    .toLowerCase();
+  return {
+    title,
+    year,
+    isSeries: ["series", "tv", "show", "tvshow"].includes(metaType)
+  };
+}
+
+// One source instance per app: it owns the Magis client (created lazily with
+// the persistence above) and never throws to the repository.
+const magisStreamSource = createMagisStreamSource({
+  persistence: magisSessionPersistence,
+  titleLookup: magisTitleLookup
+});
 
 function pluginSearchTimeoutMs(mediaType) {
   const configured = Number(PluginManager.getSearchTimeoutMs?.(mediaType) || 0);
@@ -417,6 +466,42 @@ class StreamRepository {
       }
     });
 
+    // Magis VOD runs concurrently with the addon tasks: its group is emitted
+    // through the same notifyChunk path as soon as it is ready, so it never
+    // delays the addon results. Entirely non-fatal: resolveStreamGroup never
+    // throws (it returns null and keeps a diagnostic), so addon behaviour
+    // stays byte-identical with or without Magis.
+    let magisTimeoutId = 0;
+    const magisTask = (async () => {
+      try {
+        if (!magisStreamSource.isAvailable()) return null;
+        return await magisStreamSource.resolveStreamGroup({
+          type,
+          videoId,
+          season: options?.season ?? null,
+          episode: options?.episode ?? null,
+          signal: options.signal
+        });
+      } catch (error) {
+        console.warn("Magis stream source failed", error);
+        return null;
+      }
+    })();
+    const magisEmission = magisTask
+      .then((group) => {
+        if (group?.streams?.length) {
+          notifyChunk(group);
+        }
+        return group;
+      })
+      .catch((error) => {
+        console.warn("Magis stream source failed", error);
+        return null;
+      });
+    const magisTimeout = new Promise((resolve) => {
+      magisTimeoutId = setTimeout(() => resolve(null), MAGIS_STREAM_RESOLUTION_TIMEOUT_MS);
+    });
+
     let acceptPluginChunks = true;
     const pluginAbortController =
       typeof AbortController === "function" ? new AbortController() : null;
@@ -563,11 +648,22 @@ class StreamRepository {
     if (pluginTimeoutId) {
       clearTimeout(pluginTimeoutId);
     }
+    // The Magis group has already been emitted through notifyChunk whenever it
+    // became ready; await it (bounded by its own deadline) so the session can
+    // complete with it included without ever delaying the addon results.
+    const magisGroup = await Promise.race([magisEmission, magisTimeout]);
+    if (magisTimeoutId) {
+      clearTimeout(magisTimeoutId);
+    }
     options.signal?.removeEventListener?.("abort", forwardCallerAbort);
     // Keep a compatibility fallback for a future source implementation that
     // returns groups without calling notifyChunk. Current add-on and plugin
     // paths both notify at completion, so this normally preserves the exact
-    // Android-like completion order above.
+    // Android-like completion order above. The Magis group is already recorded
+    // through notifyChunk; record again is idempotent by group key.
+    if (magisGroup?.streams?.length) {
+      recordEmittedGroup(magisGroup);
+    }
     [...addonsWithStreams, ...pluginStreams].forEach(recordEmittedGroup);
     return { status: "success", data: emittedGroups };
   }
