@@ -43,11 +43,11 @@ export {
   buildMatchRows
 } from "./sportsScreenMethods-02-render.js";
 
-function isBackEvent(event) {
+export function isBackEvent(event) {
   return Environment.isBackEvent(event);
 }
 
-function escapeHtml(value) {
+export function escapeHtml(value) {
   return String(value || "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

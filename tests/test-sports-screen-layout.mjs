@@ -229,3 +229,26 @@ describe("honest states and lifecycle", () => {
     assert.match(mountSource, /clearTimeout|clearNoticeTimer|noticeTimer\s*=\s*0/);
   });
 });
+
+// Regression: the sibling method modules reach every helper through `internals`
+// (the screen module). A helper that exists but is not exported makes the first
+// render throw, which on the TV looks like a black screen and nothing else.
+test("every helper the sibling modules destructure is exported by the screen module", async () => {
+  const screen = await import("../js/ui/screens/sports/sportsScreen.js");
+  const required = [
+    "Router",
+    "ScreenUtils",
+    "Environment",
+    "sportsRepository",
+    "buildSections",
+    "sportChips",
+    "formatKickoffTime",
+    "escapeHtml",
+    "isBackEvent"
+  ];
+  const missing = required.filter((name) => screen[name] === undefined);
+  assert.deepEqual(missing, [], `the screen module does not export: ${missing.join(", ")}`);
+  for (const name of ["escapeHtml", "isBackEvent", "formatKickoffTime", "buildSections", "sportChips"]) {
+    assert.equal(typeof screen[name], "function", `${name} must be callable`);
+  }
+});
