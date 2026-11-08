@@ -514,6 +514,55 @@ function setupTizenPlaybackLifecycle() {
   });
 }
 
+function probeCrossOriginRead() {
+  // One-shot diagnostic for a device with no logs: can this runtime READ a
+  // cross-origin response from a host that sends no CORS headers? Tizen widgets
+  // declare <access origin="*"/>, and the answer decides whether Magis VOD can
+  // live entirely inside the app or needs a proxy hop. Reports through the same
+  // optional LAN beacon as the plugin runtime; never affects bootstrap.
+  const report = (payload) => {
+    try {
+      void import("./core/diagnostics/runtimeBeacon.js")
+        .then((mod) => mod.sendRuntimeBeacon(payload))
+        .catch(() => {});
+    } catch (_) {
+      // Diagnostics are optional.
+    }
+  };
+  const probe = async (label, url, init) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      const body = await response.text();
+      report({
+        phase: "cors-read",
+        ok: true,
+        detail: `${label} status=${response.status} bytes=${body.length}`
+      });
+    } catch (error) {
+      report({
+        phase: "cors-read",
+        ok: false,
+        error: `${label} ${String(error?.message || error)}`
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  void probe("simple-get", "https://hackstore2.com/");
+  void probe("preflighted-post", "https://osuhk.m3x8o50te.com/api/portalCore/v3/snToken", {
+    method: "POST",
+    headers: {
+      apk: "com.android.msandroid",
+      apkVer: "43404",
+      spkgVer: "2025-08-07 05:40:11_36_16_",
+      "Content-Type": "application/json"
+    },
+    body: "00"
+  });
+}
+
 function startPluginRuntimeSelfTest() {
   try {
     // Fire-and-forget runtime probe: report the plugin worker outcome on
@@ -605,6 +654,7 @@ async function bootstrapApp() {
   // versions where the packaged WRT plugin service is unavailable: the worker
   // runtime and the network service are independent capabilities.
   startPluginRuntimeSelfTest();
+  probeCrossOriginRead();
   applyPerformanceMode();
   markBootStage("Loading language resources");
   await I18n.init();
