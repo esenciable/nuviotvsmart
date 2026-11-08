@@ -713,3 +713,84 @@ describe("search text normalization", () => {
     assert.equal(normalizeSearchText("  Televisión Española "), "television espanola");
   });
 });
+
+describe("virtualized channel list (only a window of rows exists in the DOM)", () => {
+  const renderSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-02-render.js", import.meta.url),
+    "utf8"
+  );
+
+  const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const styleStart = renderSource.indexOf('<style id="live-screen-style">');
+  const styleEnd = renderSource.indexOf("</style>", styleStart);
+  const style = renderSource.slice(styleStart, styleEnd);
+  const ruleBody = (selector) => {
+    const match = style.match(new RegExp(`${escapeRegex(selector)}\\s*\\{([^}]*)\\}`));
+    assert.ok(match, `CSS rule ${selector} exists`);
+    return match[1];
+  };
+  const functionBody = (name, nextAnchor) => {
+    const start = renderSource.indexOf(`${name}(`);
+    assert.ok(start >= 0, `${name} exists`);
+    const end = renderSource.indexOf(nextAnchor, start);
+    assert.ok(end > start, `${name} is followed by ${nextAnchor}`);
+    return renderSource.slice(start, end);
+  };
+  test("the renderer emits a windowed list container with top and bottom spacers, never every row inline", () => {
+    const listBody = functionBody("renderChannelList", "renderChannelRowInner(");
+    assert.match(listBody, /data-virtual-list/);
+    assert.doesNotMatch(listBody, /renderChannelRow\(/, "the list must not map every channel into markup");
+    // Spacers are created/positioned by the window sync, not inline markup.
+    assert.match(renderSource, /applyChannelSpacer\(list, "top"/);
+    assert.match(renderSource, /applyChannelSpacer\(list, "bottom"/);
+    assert.match(renderSource, /setAttribute\(\s*"data-spacer"/);
+    assert.match(style, /live-list-spacer/);
+  });
+
+  test("the window sync recycles a fixed pool of row nodes instead of creating and destroying per scroll step", () => {
+    assert.match(renderSource, /syncChannelWindow/);
+    assert.match(renderSource, /computeChannelWindow\(/);
+    assert.match(renderSource, /channelSpacerHeights\(/);
+    const syncBody = functionBody("syncChannelWindow", "prepareChannelWindow(");
+    assert.match(syncBody, /fillChannelRowNode/, "entering rows are filled into pooled nodes");
+    assert.match(syncBody, /insertBefore/, "rows keep ascending DOM order between the spacers");
+    // Same-window early exit: a scroll step inside one window does no DOM work.
+    assert.match(syncBody, /previous\.start === window\.start && previous\.end === window\.end/);
+  });
+
+  test("the scroll-path recompute is passive and never steals focus (no applyFocusState, no focus() in the handler)", () => {
+    assert.match(renderSource, /addEventListener\(\s*"scroll",\s*this\.channelListScrollHandler\(\),\s*\{\s*passive:\s*true\s*\}\)/);
+    const handlerBody = functionBody("channelListScrollHandler", "syncChannelWindow(");
+    assert.doesNotMatch(handlerBody, /applyFocusState/);
+    assert.doesNotMatch(handlerBody, /\.focus\(/);
+  });
+
+  test("the focused row exists before focus is applied: applyFocusState syncs the window anchored on the focused row", () => {
+    const applyStart = renderSource.indexOf("applyFocusState() {");
+    const applyEnd = renderSource.indexOf("focusedNode() {", applyStart);
+    const applyPath = renderSource.slice(applyStart, applyEnd);
+    assert.match(applyPath, /syncChannelWindow\(\{\s*focusIndex:\s*this\.rowIndex/);
+    assert.match(applyPath, /mode:\s*"focus"/);
+  });
+
+  test("measure once per data change: the viewport height is cached and the pitch comes from the fixed constants", () => {
+    assert.match(renderSource, /LIVE_ROW_HEIGHT = 51/);
+    assert.match(renderSource, /LIVE_ROW_GAP = 6/);
+    assert.match(renderSource, /LIVE_VIRTUAL_BUFFER = 8/);
+    const syncBody = functionBody("syncChannelWindow", "prepareChannelWindow(");
+    assert.match(syncBody, /_virtualMeasurePending/);
+    // The scroll path itself must not read layout: clientHeight is only read
+    // behind the per-data-change measure guard.
+    const guarded = syncBody.slice(syncBody.indexOf("_virtualMeasurePending"));
+    const beforeGuard = syncBody.slice(0, syncBody.indexOf("_virtualMeasurePending"));
+    assert.doesNotMatch(beforeGuard, /clientHeight/);
+    assert.match(guarded, /clientHeight/);
+  });
+
+  test("the virtual pitch matches the fixed CSS geometry (51px row + 6px gap)", () => {
+    const row = ruleBody(".live-channel-row");
+    assert.match(row, /height:\s*51px/);
+    const list = ruleBody(".live-channel-list");
+    assert.match(list, /gap:\s*6px/);
+  });
+});

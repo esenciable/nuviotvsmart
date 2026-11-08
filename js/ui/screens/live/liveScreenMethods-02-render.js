@@ -524,6 +524,91 @@ export function railFocusAfterChange(nextItems, previousIndex, previousItem) {
   return clampIndex(previousIndex, items.length);
 }
 
+// Virtualized channel list -----------------------------------------------
+// Samsung's memory guide requires any TV list over ~100 items to be
+// virtualized, and this channel list can hold 500 rows: only the rows inside
+// the visible window plus a buffer (LIVE_VIRTUAL_BUFFER above and below)
+// exist in the DOM. A top and a bottom spacer preserve the FULL scroll
+// height, so the scrollbar and the scroll position stay exactly where the
+// fixed geometry puts them. These helpers are pure so node --test pins the
+// windowing without a DOM (tests/test-live-virtual-list.mjs).
+
+// Fixed geometry of a channel row: 51px tile + 6px flex gap (the layout
+// contract below pins both in CSS). The pitch is a constant, never measured
+// per scroll step — only the scroll container's height is measured, once per
+// data change.
+export const LIVE_ROW_HEIGHT = 51;
+export const LIVE_ROW_GAP = 6;
+export const LIVE_ROW_PITCH = LIVE_ROW_HEIGHT + LIVE_ROW_GAP;
+
+// Rows kept in the DOM above and below the visible window.
+export const LIVE_VIRTUAL_BUFFER = 8;
+
+// Fallback viewport height (12 rows) for the frame before the container is
+// measurable (hidden container, first paint). Corrected by the real measure
+// on the next data change.
+export const LIVE_LIST_VIEWPORT_FALLBACK = 12 * LIVE_ROW_PITCH;
+
+// Pure windowing model. Modes:
+//   "scroll" (scroll events): the window covers the viewport plus the
+//      buffer; a focused row the scroll moved away from is FORCED back in by
+//      extending the window, so the recompute can never drop the focused
+//      node and steal focus.
+//   "focus" (a focus move / a window painted for focus): when the focused
+//      row is not inside the viewport window, the window re-anchors around
+//      it so its node exists at its absolute position and plain focus()
+//      reveals it natively; when it is already inside, the viewport window
+//      is kept (no churn on normal moves).
+// The result is always clamped to [0, total] at both ends; a short list
+// (fewer rows than the window) renders fully.
+export function computeChannelWindow({
+  total,
+  scrollTop = 0,
+  viewportHeight = 0,
+  focusIndex = -1,
+  mode = "scroll",
+  buffer = LIVE_VIRTUAL_BUFFER
+} = {}) {
+  const count = Math.max(0, Math.trunc(Number(total)) || 0);
+  if (count === 0) return { start: 0, end: 0 };
+  const top = Math.max(0, Math.trunc(Number(scrollTop)) || 0);
+  const height = Math.max(0, Number(viewportHeight) || 0);
+  const buf = Math.max(0, Math.trunc(Number(buffer)) || 0);
+  let start = Math.max(0, Math.floor(top / LIVE_ROW_PITCH) - buf);
+  let end = Math.min(count, Math.ceil((top + height) / LIVE_ROW_PITCH) + buf);
+  const focus = Math.trunc(Number(focusIndex));
+  const hasFocus = Number.isInteger(focus) && focus >= 0 && focus < count;
+  if (hasFocus && (focus < start || focus >= end)) {
+    const focusStart = Math.max(0, focus - buf);
+    const focusEnd = Math.min(count, focus + 1 + buf);
+    if (mode === "focus") {
+      start = focusStart;
+      end = Math.max(focusEnd, start);
+    } else {
+      start = Math.min(start, focusStart);
+      end = Math.max(end, focusEnd);
+    }
+  }
+  start = Math.min(start, count - 1);
+  end = Math.max(start, Math.min(end, count));
+  return { start, end };
+}
+
+// Spacer heights for a window. Because the list lays rows out with a flex
+// gap, a spacer contributes its own gap to the flow: the heights subtract
+// exactly that gap, so spacer + window rows reproduce the full list height
+// EXACTLY (pinned by test). A height of 0 means "emit no spacer" — a
+// zero-height flex child would still contribute a phantom gap.
+export function channelSpacerHeights({ start, end, total } = {}) {
+  const count = Math.max(0, Math.trunc(Number(total)) || 0);
+  const from = Math.max(0, Math.trunc(Number(start)) || 0);
+  const to = Math.max(from, Math.trunc(Number(end)) || 0);
+  return {
+    topSpacerHeight: from > 0 ? Math.max(0, from * LIVE_ROW_PITCH - LIVE_ROW_GAP) : 0,
+    bottomSpacerHeight: to < count ? Math.max(0, (count - to) * LIVE_ROW_PITCH - LIVE_ROW_GAP) : 0
+  };
+}
+
 // Fluidity: held-key auto-repeat must advance the list at a steady cadence
 // instead of queuing behind the scroll animation. A repeat faster than the
 // cadence is dropped.
@@ -617,6 +702,12 @@ export function createLiveScreenMethods02() {
       .live-rail-category .live-rail-label { font-weight: 500; font-size: 21px; color: #B3B3B3; }
       /* CHANNEL ROWS (right side) ------------------------------------------- */
       .live-channel-list { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; scroll-behavior: auto; position: relative; display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; }
+      /* Virtualization spacers: invisible flex children that hold the scroll
+         height of the rows OUTSIDE the window (heights set by the window
+         sync, from the pure spacer arithmetic). No size, no background: the
+         scrollbar and the scroll position stay exactly where the full list
+         would put them. */
+      .live-list-spacer { flex-shrink: 0; width: 100%; }
       /* Fixed row pitch 57px: tile 51px + 6px gap. Inner padding 15px; the
          2-line-clamped 21px name, the muted meta line and the star live
          INSIDE the fixed tile — long text can never grow the row. No logo
@@ -682,6 +773,8 @@ export function createLiveScreenMethods02() {
           </div>
         `;
         this.container.innerHTML = shellMarkup;
+
+        this.prepareChannelWindow();
 
         ScreenUtils.indexFocusables(this.container);
         this.applyFocusState();
@@ -1014,6 +1107,15 @@ export function createLiveScreenMethods02() {
     applyFocusState() {
       try {
         this.normalizeFocusState();
+        // Virtualized rows: the focused row's node must EXIST before focus
+        // is applied below. The window sync anchors on the focused row (mode
+        // "focus"), so the node is in the DOM at its absolute position and
+        // the plain focus() reveal scrolls it into view natively — including
+        // when focus arrives from the selection memory after a player, and
+        // when the window is recomputed on data arrival.
+        if (this.focusZone === "rows") {
+          this.syncChannelWindow({ focusIndex: this.rowIndex, mode: "focus" });
+        }
         const target = this.focusedNode();
         this.container?.querySelectorAll(".focusable.focused").forEach((node) => {
           if (node !== target) node.classList.remove("focused");
@@ -1111,7 +1213,7 @@ export function createLiveScreenMethods02() {
           if (!results.length) {
             return `<div class="live-channel-list"><div class="live-panel-hint">${escapeHtml(t("live_search_empty", {}, "Sin resultados"))}</div></div>`;
           }
-          return `<div class="live-channel-list">${results.map((channel, index) => this.renderChannelRow(channel, index)).join("")}</div>`;
+          return this.renderWindowedListMarkup();
         }
         if (this.channelsLoading) {
           return `
@@ -1129,36 +1231,212 @@ export function createLiveScreenMethods02() {
         if (!rows.length) {
           return `<div class="live-channel-list"><div class="live-panel-hint">${escapeHtml(t("live_channels_empty", {}, "No channels available"))}</div></div>`;
         }
-        return `<div class="live-channel-list">${rows.map((channel, index) => this.renderChannelRow(channel, index)).join("")}</div>`;
+        return this.renderWindowedListMarkup();
       } catch (error) {
         reportLiveErrorSafe(error, "renderChannelList");
         return `<div class="live-channel-list"><div class="live-panel-error">Live TV error</div></div>`;
       }
     },
 
-    renderChannelRow(channel, index = 0) {
+    // The windowed list shell. The rows themselves are painted by
+    // syncChannelWindow (a fixed pool of nodes between two spacers), never
+    // inline: with 500 channels only the window ever exists in the DOM.
+    renderWindowedListMarkup() {
+      return `<div class="live-channel-list" data-virtual-list="true"></div>`;
+    },
+
+    // The row's inner markup: the 2-line-clamped name, the muted number +
+    // source line and the favourite star — the existing row design, no logo
+    // box, nothing on this screen loads an image. Shared by the pooled-node
+    // filler so a recycled row renders exactly like a fresh one.
+    renderChannelRowInner(channel) {
       const label = formatChannelRowLabel(channel);
       const isFavorite = this.isFavoriteId(channel?.id);
       const source = sourceNameFromChannelId(channel?.id) || sourceNameFromColumnId(channel?.group);
       return `
-        <article class="live-channel-row focusable"
-                 data-action="tuneIn"
-                 data-row-index="${Number(index) || 0}"
-                 data-channel-id="${escapeHtml(String(channel?.id || ""))}"
-                 data-channel-title="${escapeHtml(channel?.name || t("live_channel_fallback_title", {}, "Live channel"))}">
-          <div class="live-row-text">
-            <div class="live-row-name">${escapeHtml(label.name)}</div>
-            <div class="live-row-meta">${label.number ? `<span class="live-row-number">${escapeHtml(label.number)}</span>` : ""}${source ? `<span class="live-row-source">${escapeHtml(source)}</span>` : ""}</div>
-          </div>
-          <button class="live-star focusable${isFavorite ? " is-favorite" : ""}"
-                  data-action="toggleFavorite"
-                  data-channel-id="${escapeHtml(String(channel?.id || ""))}"
-                  aria-label="${escapeHtml(t("live_favorite_toggle", {}, "Favorito"))}"
-                  aria-pressed="${isFavorite ? "true" : "false"}">
-            <span class="live-star-glyph" aria-hidden="true">${isFavorite ? "★" : "☆"}</span>
-          </button>
-        </article>
+        <div class="live-row-text">
+          <div class="live-row-name">${escapeHtml(label.name)}</div>
+          <div class="live-row-meta">${label.number ? `<span class="live-row-number">${escapeHtml(label.number)}</span>` : ""}${source ? `<span class="live-row-source">${escapeHtml(source)}</span>` : ""}</div>
+        </div>
+        <button class="live-star focusable${isFavorite ? " is-favorite" : ""}"
+                data-action="toggleFavorite"
+                data-channel-id="${escapeHtml(String(channel?.id || ""))}"
+                aria-label="${escapeHtml(t("live_favorite_toggle", {}, "Favorito"))}"
+                aria-pressed="${isFavorite ? "true" : "false"}">
+          <span class="live-star-glyph" aria-hidden="true">${isFavorite ? "★" : "☆"}</span>
+        </button>
       `;
+    },
+
+    // Swaps a pooled row node's content for another channel: the article
+    // node is REUSED, only its dataset and children change. This is the
+    // recycling primitive — a scroll step never creates or destroys nodes
+    // once the pool is warm.
+    fillChannelRowNode(node, channel, index = 0) {
+      node.className = "live-channel-row focusable";
+      node.setAttribute("data-action", "tuneIn");
+      node.setAttribute("data-row-index", String(Number(index) || 0));
+      node.setAttribute("data-channel-id", String(channel?.id || ""));
+      node.setAttribute("data-channel-title", String(channel?.name || t("live_channel_fallback_title", {}, "Live channel")));
+      node.innerHTML = this.renderChannelRowInner(channel);
+      return node;
+    },
+
+    // VIRTUAL WINDOW SYNC --------------------------------------------------
+    // Paints the current window into the list: spacers first (exact scroll
+    // height), then the fixed pool of row nodes. A window move RECYCLES: a
+    // pooled node whose row left the window is refilled with an entering row
+    // (content swap), so per scroll step no nodes are created or destroyed
+    // in the steady state. The recompute is arithmetic only — the viewport
+    // height is measured once per data change (prepareChannelWindow), the
+    // row pitch is a fixed constant — and it NEVER touches focus: the
+    // focused row is forced inside the window, its node survives, and DOM
+    // focus stays exactly where it was.
+    syncChannelWindow({ focusIndex = -1, mode = "scroll" } = {}) {
+      try {
+        const list = this.container?.querySelector('.live-channel-list[data-virtual-list="true"]');
+        if (!list) return;
+        const rows = this.visibleChannels();
+        const total = Array.isArray(rows) ? rows.length : 0;
+        if (!total) {
+          this._virtualWindow = null;
+          return;
+        }
+        // Measure ONCE per data change (the pending flag is set by
+        // prepareChannelWindow); scrolling only ever does arithmetic below.
+        if (this._virtualMeasurePending) {
+          this._virtualViewportHeight = list.clientHeight > 0 ? list.clientHeight : LIVE_LIST_VIEWPORT_FALLBACK;
+          this._virtualMeasurePending = false;
+          this._virtualWindow = null;
+        }
+        const window = computeChannelWindow({
+          total,
+          scrollTop: list.scrollTop || 0,
+          viewportHeight: this._virtualViewportHeight || LIVE_LIST_VIEWPORT_FALLBACK,
+          focusIndex,
+          mode
+        });
+        const previous = this._virtualWindow;
+        if (previous && previous.start === window.start && previous.end === window.end && previous.total === total) {
+          return; // same window: zero DOM work for this scroll step
+        }
+        const spacers = channelSpacerHeights({ start: window.start, end: window.end, total });
+        const topSpacer = this.applyChannelSpacer(list, "top", spacers.topSpacerHeight);
+        const bottomSpacer = this.applyChannelSpacer(list, "bottom", spacers.bottomSpacerHeight);
+
+        // Recycle: keep every pooled node whose row is still in the window;
+        // fill the others with the entering rows.
+        const existing = new Map();
+        list.querySelectorAll(".live-channel-row").forEach((node) => {
+          existing.set(Number(node.dataset.rowIndex), node);
+        });
+        const recycled = [];
+        existing.forEach((node, index) => {
+          if (!(index >= window.start && index < window.end)) recycled.push(node);
+        });
+        let recycleCursor = 0;
+        const ordered = [];
+        for (let index = window.start; index < window.end; index += 1) {
+          let node = existing.get(index);
+          if (!node) {
+            node = recycled[recycleCursor];
+            if (node) {
+              recycleCursor += 1;
+            } else {
+              // Pool growth only (first paint, or a wider window): the node
+              // then stays pooled for the screen's lifetime.
+              node = document.createElement("article");
+              node.className = "live-channel-row focusable";
+            }
+            this.fillChannelRowNode(node, rows[index], index);
+          }
+          ordered.push(node);
+        }
+        // Surplus nodes exist only when the window shrinks at a list end.
+        for (; recycleCursor < recycled.length; recycleCursor += 1) {
+          recycled[recycleCursor].remove();
+        }
+        // Ascending DOM order between the spacers — the classic minimal-move
+        // reorder: a node already at its expected slot is left untouched.
+        let anchor = topSpacer ? topSpacer.nextSibling : list.firstChild;
+        for (const node of ordered) {
+          if (node === anchor) {
+            anchor = node.nextSibling;
+          } else {
+            list.insertBefore(node, anchor);
+          }
+        }
+        this._virtualWindow = { start: window.start, end: window.end, total };
+      } catch (error) {
+        reportLiveErrorSafe(error, "syncChannelWindow");
+      }
+    },
+
+    // Creates, sizes or removes one scroll spacer. Height 0 means ABSENT: a
+    // zero-height flex child would still contribute a phantom gap and shift
+    // the rows by the gap width.
+    applyChannelSpacer(list, which, height) {
+      const existing = list.querySelector(`[data-spacer="${which}"]`);
+      if (!height || height <= 0) {
+        existing?.remove();
+        return null;
+      }
+      let spacer = existing;
+      if (!spacer) {
+        spacer = document.createElement("div");
+        spacer.className = "live-list-spacer";
+        spacer.setAttribute("data-spacer", which);
+        spacer.setAttribute("aria-hidden", "true");
+        if (which === "top") list.insertBefore(spacer, list.firstChild);
+        else list.appendChild(spacer);
+      }
+      spacer.style.height = `${height}px`;
+      return spacer;
+    },
+
+    // Scroll-path recompute (remote, wheel, any native scroll): arithmetic
+    // plus a content swap of the entering rows only. It never calls
+    // applyFocusState and never calls focus() — the recompute cannot steal
+    // focus.
+    channelListScrollHandler() {
+      if (!this._onChannelListScroll) {
+        this._onChannelListScroll = () => {
+          this.syncChannelWindow({
+            focusIndex: this.focusZone === "rows" ? this.rowIndex : -1,
+            mode: "scroll"
+          });
+        };
+      }
+      return this._onChannelListScroll;
+    },
+
+    // After a real render or an in-place data refresh: measures the scroll
+    // container ONCE (the row pitch is a fixed constant of the layout
+    // contract), restores a pending scroll position, binds the passive
+    // scroll listener and paints the initial window — anchored on the
+    // focused row whenever focus is in the rows, so a restored selection
+    // from the player's selection memory always has its row in the DOM.
+    prepareChannelWindow() {
+      try {
+        const list = this.container?.querySelector(".live-channel-list");
+        if (!list || !list.hasAttribute("data-virtual-list")) return;
+        this._virtualMeasurePending = true;
+        this._virtualWindow = null;
+        if (this._virtualPendingScrollTop != null) {
+          list.scrollTop = Math.max(0, Number(this._virtualPendingScrollTop) || 0);
+          this._virtualPendingScrollTop = null;
+        }
+        if (!list.dataset.virtualScrollBound) {
+          list.dataset.virtualScrollBound = "true";
+          list.addEventListener("scroll", this.channelListScrollHandler(), { passive: true });
+        }
+        this.syncChannelWindow({
+          focusIndex: this.focusZone === "rows" ? this.rowIndex : -1,
+          mode: "focus"
+        });
+      } catch (error) {
+        reportLiveErrorSafe(error, "prepareChannelWindow");
+      }
     },
 
     // In-place refresh of the rail counts and the channel list only (data
@@ -1188,11 +1466,15 @@ export function createLiveScreenMethods02() {
           currentRail.replaceWith(nextRail);
         }
         if (nextList && list) {
-          nextList.scrollTop = previousScrollTop;
+          // The scrollTop is restored AFTER insertion (a detached node has no
+          // scroll position): the window sync reads it back so the scroll
+          // position stays exactly where it was across the data refresh.
+          this._virtualPendingScrollTop = previousScrollTop;
           list.replaceWith(nextList);
         } else if (nextList) {
           this.container.querySelector(".live-body")?.appendChild(nextList);
         }
+        this.prepareChannelWindow();
         ScreenUtils.indexFocusables(this.container);
         this.applyFocusState();
         this.updateHeroForFocus({ force: true });
