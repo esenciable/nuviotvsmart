@@ -43,23 +43,25 @@ function defaultArgs({ tmdbId, mediaType, season = null, episode = null } = {}) 
 }
 
 async function selfTestInternal(client, { quota = PLUGIN_QUOTAS.limited } = {}) {
-    if (typeof Worker !== "function") throw new Error("Worker API unavailable");
-    if (typeof WebAssembly !== "object") throw new Error("WebAssembly API unavailable");
-    if (!runtimeTestPromise) {
-      runtimeTestPromise = client.executePlugin({
+  if (typeof Worker !== "function") throw new Error("Worker API unavailable");
+  if (typeof WebAssembly !== "object") throw new Error("WebAssembly API unavailable");
+  if (!runtimeTestPromise) {
+    runtimeTestPromise = client
+      .executePlugin({
         code: "module.exports.getStreams = function(){ return []; };",
         filename: "runtime-self-test.js",
         scraperId: "runtime-self-test",
         args: { tmdbId: "", mediaType: "movie", season: null, episode: null },
         quota,
         skipService: true
-      }).catch((error) => {
+      })
+      .catch((error) => {
         runtimeTestPromise = null;
         throw error;
       });
-    }
-    return runtimeTestPromise;
   }
+  return runtimeTestPromise;
+}
 
 export const PluginRuntime = {
   listSources() {
