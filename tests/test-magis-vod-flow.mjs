@@ -298,17 +298,20 @@ test("vod: series flow calls getItemData and targets the requested episode", asy
         }
       ]
     },
-    "v3/getItemData": {
-      episodeList: [
-        {
-          season: 1,
-          totalMovieList: [{ movieList: [{ contentId: "e-s1e1", videoFormat: "mp4", encodeFormat: "H264", quality: "720P", licenseList: [{ license: "lic-ep1" }] }] }]
-        },
-        {
-          season: 2,
-          totalMovieList: [{ movieList: [{ contentId: "e-s2e3", videoFormat: "mp4", encodeFormat: "H264", quality: "720P", licenseList: [{ license: "lic-ep2" }] }] }]
-        }
-      ]
+    // Measured shape: v4/getItemData answers assetData with the season packs and
+    // the episode list, and startPlayVOD needs the episode plus the pack id.
+    "v4/getItemData": {
+      assetData: {
+        sameSeasonSeriesList: [
+          { seasonNumber: 1, contentId: "1001" },
+          { seasonNumber: 2, contentId: "2001" }
+        ],
+        simpleProgramList: [
+          { seriesNumber: 1, contentId: "e-s2e1", name: "01" },
+          { seriesNumber: 2, contentId: "e-s2e2", name: "02" },
+          { seriesNumber: 3, contentId: "e-s2e3", name: "03" }
+        ]
+      }
     },
     "v10/startPlayVOD": {
       episodeList: [
@@ -337,6 +340,11 @@ test("vod: series flow calls getItemData and targets the requested episode", asy
   const playPayload = crypto.decryptData(playCall.body);
   assert.equal(playPayload.contentId, "e-s2e3");
   assert.equal(playPayload.seriesContentId, "2001");
+  assert.equal(
+    harness.calls.filter((c) => c.path === "v4/getItemData").length,
+    1,
+    "the searched pack is already the requested season, so no refetch"
+  );
   assert.equal(result.url, "https://cdn-b.vod.example/vod/e-s2e3_media.mp4");
   assert.equal(result.headers["Content-License"], "lic-ep2");
 });

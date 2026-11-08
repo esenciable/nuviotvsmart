@@ -47,32 +47,33 @@ export function pickSearchCandidate(items, { title, year, isSeries }) {
 
 // Locate the requested episode in a getItemData answer without assuming the
 // portal's exact season/episode field names (they were not fully measured).
-export function collectEpisodes(itemDataAnswer) {
-  return (itemDataAnswer?.episodeList || []).flatMap((entry) => {
-    const season = entry?.season ?? entry?.seasonIndex ?? entry?.seasonNum;
-    return (entry?.totalMovieList || []).flatMap((group) =>
-      (group?.movieList || []).map((movie) => ({ season, movie }))
-    );
-  });
+// Measured shape of v4/getItemData: assetData carries the season packs and the
+// episode list, not the startPlayVOD movie shape.
+export function collectSeasonPacks(itemDataAnswer) {
+  const asset = itemDataAnswer?.assetData || {};
+  return (asset.sameSeasonSeriesList || []).map((entry) => ({
+    season: Number(entry?.seasonNumber),
+    contentId: String(entry?.contentId || "")
+  }));
 }
 
-export function pickEpisode(episodes, { season, episode }) {
+export function collectEpisodes(itemDataAnswer) {
+  const asset = itemDataAnswer?.assetData || {};
+  return (asset.simpleProgramList || []).map((entry) => ({
+    episode: Number(entry?.seriesNumber),
+    contentId: String(entry?.contentId || ""),
+    name: String(entry?.name || "")
+  }));
+}
+
+export function pickEpisode(episodes, { episode } = {}) {
   if (!episodes.length) return null;
-  const matches = (entry) => {
-    const movie = entry.movie;
-    if (!movie?.contentId) return false;
-    const entrySeason = entry.season ?? movie.season ?? movie.seasonNum ?? movie.seasonNo;
-    const entryEpisode =
-      movie.episode ?? movie.episodeNum ?? movie.episodeNo ?? movie.number ?? movie.num;
-    if (season != null && entrySeason != null && Number(entrySeason) !== Number(season)) {
-      return false;
-    }
-    if (episode != null && entryEpisode != null && Number(entryEpisode) !== Number(episode)) {
-      return false;
-    }
-    return season != null || episode != null;
-  };
-  return episodes.find(matches)?.movie || episodes[0].movie;
+  const wanted = Number(episode) || 1;
+  return (
+    episodes.find((entry) => entry.episode === wanted && entry.contentId) ||
+    episodes.find((entry) => entry.contentId) ||
+    null
+  );
 }
 
 // h264 + mp4 preferred, then the larger height (measured scoring).
@@ -158,19 +159,34 @@ export function createMagisVod({ portal, config, session, mediaTransport } = {})
       throw new Error(`magisVod: no search result for "${title}"`);
     }
 
-    // 2. optional getItemData for series
+    // 2. resolve the season pack and the episode. Measured: v4/getItemData is the
+    // call that answers assetData { sameSeasonSeriesList[], simpleProgramList[] },
+    // and startPlayVOD for a series needs BOTH the episode contentId and the
+    // season pack id as seriesContentId; an episode alone is rejected.
     let seriesContentId = "";
     let episodeContentId = "";
     if (isSeries) {
       seriesContentId = String(candidate.contentId);
-      const itemData = await portal.call("v3/getItemData", {
-        ...base,
-        contentId: seriesContentId,
-        ...device
-      });
-      const episodeMovie = pickEpisode(collectEpisodes(itemData), { season, episode });
-      if (episodeMovie?.contentId) {
-        episodeContentId = String(episodeMovie.contentId);
+      const fetchItemData = (contentId) =>
+        portal.call("v4/getItemData", {
+          ...base,
+          contentId,
+          type: "0",
+          sortType: "0",
+          language: "en",
+          macAddr: "02:00:00:00:00:00",
+          ...device
+        });
+      let itemData = await fetchItemData(seriesContentId);
+      const wantedSeason = Number(season) || 1;
+      const pack = collectSeasonPacks(itemData).find((entry) => entry.season === wantedSeason);
+      if (pack?.contentId && pack.contentId !== seriesContentId) {
+        seriesContentId = pack.contentId;
+        itemData = await fetchItemData(seriesContentId);
+      }
+      const picked = pickEpisode(collectEpisodes(itemData), { season, episode });
+      if (picked?.contentId) {
+        episodeContentId = String(picked.contentId);
       }
     }
 
