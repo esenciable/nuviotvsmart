@@ -392,14 +392,14 @@ export const TizenPluginService = {
       return { status: "unsupported", detail: "Plugin service is not packaged" };
     }
     const capabilities = TizenCapabilities.get();
-    if (!capabilities.tizenPluginVersionSupported) {
-      diagnostic("ensure skipped", {
-        reason: "Tizen plugin support starts at Tizen 6.0",
-        tizenVersion: capabilities.tizenVersion || "",
-        tizenMajorVersion: capabilities.tizenMajorVersion || 0
-      });
-      return { status: "unsupported", detail: "Tizen plugin support starts at Tizen 6.0" };
-    }
+    // FORK PATCH: this used to refuse every firmware below the numeric plugin
+    // baseline before the start sequence ran, which reported "Tizen plugin
+    // support starts at Tizen 6.0" on a WebAssembly-capable panel that ships the
+    // packaged service (this The Frame reports Tizen 5.5). The runtime
+    // requirements are checked just below; whether the WRT service can actually
+    // be launched is answered by attempting it, not by a version number. A
+    // panel that cannot start it now fails with the real startup error instead
+    // of a version refusal, which is also what makes the failure diagnosable.
     const serviceId = getServiceId();
     diagnostic("ensure begin", {
       serviceId,

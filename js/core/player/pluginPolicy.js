@@ -108,19 +108,16 @@ export function getPluginCapabilitySnapshot() {
     const chrome = capabilities.chromiumMajorVersion || chromiumVersion();
     const appSupported = tizenVersion === 0 || tizenVersion >= 400;
     const pluginServicePackaged = globalThis.__NUVIO_TIZEN_PLUGIN_SERVICE_ENABLED__ !== false;
-    if (!capabilities.tizenPluginVersionSupported) {
-      return {
-        ...snapshotFields(platform, PLUGIN_QUOTAS.limited, {
-          appSupported,
-          normalAddonsSupported: appSupported,
-          reason: "Tizen plugin support starts at Tizen 6.0"
-        }),
-        tizenVersion: capabilities.tizenVersion,
-        chromiumMajorVersion: chrome,
-        precheckPassed: false,
-        pluginServicePackaged
-      };
-    }
+    // FORK PATCH: this branch used to refuse every firmware below the numeric
+    // plugin baseline, while TizenCapabilities.canUsePlugins already gated the
+    // section on WebAssembly plus the packaged service. The two gates disagreed,
+    // so a panel whose version string the numeric check rejects (this The Frame)
+    // showed the section and then answered "Execution unavailable on this TV
+    // runtime". The requirements the runtime actually needs are Worker and
+    // WebAssembly (checked above) plus the packaged service (below); the
+    // worker/service self-test stays the authority on whether code can run. The
+    // numeric baseline only chooses the quota, so an unverified engine keeps the
+    // bounded one.
     if (!pluginServicePackaged) {
       return {
         ...snapshotFields(platform, PLUGIN_QUOTAS.limited, {
@@ -130,12 +127,16 @@ export function getPluginCapabilitySnapshot() {
         }),
         tizenVersion: capabilities.tizenVersion,
         chromiumMajorVersion: chrome,
+        tizenPluginVersionSupported: capabilities.tizenPluginVersionSupported,
         precheckPassed: false,
         pluginServicePackaged
       };
     }
+    const quota = capabilities.tizenPluginVersionSupported
+      ? PLUGIN_QUOTAS.modern
+      : PLUGIN_QUOTAS.limited;
     return {
-      ...snapshotFields(platform, PLUGIN_QUOTAS.modern, {
+      ...snapshotFields(platform, quota, {
         appSupported,
         normalAddonsSupported: appSupported,
         candidate: true,
@@ -143,6 +144,7 @@ export function getPluginCapabilitySnapshot() {
       }),
       tizenVersion: capabilities.tizenVersion,
       chromiumMajorVersion: chrome,
+      tizenPluginVersionSupported: capabilities.tizenPluginVersionSupported,
       precheckPassed: true,
       pluginServicePackaged
     };

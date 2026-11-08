@@ -11,6 +11,7 @@ import {
   isVideoEasyScraper,
   PLUGIN_REPOSITORY_TYPES
 } from "../../../core/player/pluginModels.js";
+import { PLUGIN_QUOTAS } from "../../../core/player/pluginPolicy.js";
 
 import { createPluginsScreenMethods01 } from "./pluginsScreenMethods-01-mount.js";
 import { createPluginsScreenMethods02 } from "./pluginsScreenMethods-02-provider-rows.js";
@@ -134,15 +135,36 @@ function providerTypeBadge(type) {
   return `<span class="plugins-type-badge ${colorClass}">${escapeHtml(normalized.toUpperCase())}</span>`;
 }
 
+// TVs on this program have no on-device logs (sdb only accepts vd_* commands),
+// so every runtime diagnostic the capability snapshot already carries must be
+// readable on the panel itself. Raw values only; no new data path.
+function runtimeTechnicalLine(runtime) {
+  const quotaName = runtime.quota === PLUGIN_QUOTAS.modern ? "modern" : "limited";
+  return [
+    runtime.platform,
+    runtime.tizenVersion,
+    runtime.chromiumMajorVersion ? `chromium ${runtime.chromiumMajorVersion}` : "",
+    runtime.supportLevel,
+    `quota ${quotaName}`
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function runtimeNotice(model) {
   const runtime = model?.runtime || {};
   if (runtime.supportLevel === "unsupported") {
+    const reason = String(runtime.reason || "").trim();
+    const technical = runtimeTechnicalLine(runtime);
     return `
       <section class="plugins-runtime-card is-warning is-unsupported" role="status">
         <span class="plugins-runtime-icon material-icons" aria-hidden="true">error_outline</span>
         <div class="plugins-runtime-copy">
           <strong>${escapeHtml(t("plugin_runtime_heading", {}, "TV plugin runtime"))}</strong>
           <span>${escapeHtml(t("plugin_runtime_unsupported", {}, "Execution unavailable on this TV runtime"))}</span>
+          ${reason ? `<span>${escapeHtml(reason)}</span>` : ""}
+          ${technical ? `<span>${escapeHtml(technical)}</span>` : ""}
         </div>
       </section>
     `;
@@ -154,6 +176,24 @@ function runtimeNotice(model) {
         <div class="plugins-runtime-copy">
           <strong>${escapeHtml(t("plugin_runtime_heading", {}, "TV plugin runtime"))}</strong>
           <span>${escapeHtml(t("plugin_runtime_limited", {}, "Plugin support is limited on this TV. Some providers may be slower or unavailable."))}</span>
+        </div>
+      </section>
+    `;
+  }
+  if (runtime.candidate === true && runtime.executable !== true) {
+    const reason = String(runtime.reason || "").trim();
+    const status = String(runtime.runtimeStatus || "").trim();
+    const runtimeError = String(runtime.runtimeError || "").trim();
+    const technical = runtimeTechnicalLine(runtime);
+    return `
+      <section class="plugins-runtime-card is-warning is-runtime-pending" role="status">
+        <span class="plugins-runtime-icon material-icons" aria-hidden="true">info_outline</span>
+        <div class="plugins-runtime-copy">
+          <strong>${escapeHtml(t("plugin_runtime_heading", {}, "TV plugin runtime"))}</strong>
+          ${reason ? `<span>${escapeHtml(reason)}</span>` : ""}
+          ${status ? `<span>Runtime status: ${escapeHtml(status)}</span>` : ""}
+          ${runtimeError ? `<span>Runtime error: ${escapeHtml(runtimeError)}</span>` : ""}
+          ${technical ? `<span>${escapeHtml(technical)}</span>` : ""}
         </div>
       </section>
     `;
