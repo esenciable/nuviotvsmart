@@ -1,0 +1,518 @@
+{
+  "generatedAt": "2026-11-08T21:23:41.318Z",
+  "genericCategoryName": "ChannelList",
+  "categories": [
+    {
+      "columnId": 76182,
+      "name": "ChannelList",
+      "count": 64
+    },
+    {
+      "columnId": 76206,
+      "name": "Deportes",
+      "count": 105
+    },
+    {
+      "columnId": 87034,
+      "name": "Vivo gratis",
+      "count": 6
+    },
+    {
+      "columnId": 76205,
+      "name": "Cine y Series",
+      "count": 133
+    },
+    {
+      "columnId": 77970,
+      "name": "Más popular",
+      "count": 52
+    },
+    {
+      "columnId": 77690,
+      "name": "Venezuela",
+      "count": 9
+    },
+    {
+      "columnId": 76188,
+      "name": "Colombia",
+      "count": 40
+    },
+    {
+      "columnId": 76190,
+      "name": "Ecuador",
+      "count": 39
+    },
+    {
+      "columnId": 76207,
+      "name": "Chile",
+      "count": 25
+    },
+    {
+      "columnId": 76197,
+      "name": "México",
+      "count": 48
+    },
+    {
+      "columnId": 76187,
+      "name": "Perú",
+      "count": 19
+    },
+    {
+      "columnId": 76202,
+      "name": "Bolivia",
+      "count": 22
+    },
+    {
+      "columnId": 76201,
+      "name": "Uruguay",
+      "count": 11
+    },
+    {
+      "columnId": 77688,
+      "name": "Paraguay",
+      "count": 12
+    },
+    {
+      "columnId": 77689,
+      "name": "Panamá",
+      "count": 11
+    },
+    {
+      "columnId": 77988,
+      "name": "Puerto Rico",
+      "count": 4
+    },
+    {
+      "columnId": 76191,
+      "name": "España",
+      "count": 56
+    },
+    {
+      "columnId": 77691,
+      "name": "Costa Rica",
+      "count": 18
+    },
+    {
+      "columnId": 76194,
+      "name": "Estados Unidos",
+      "count": 41
+    },
+    {
+      "columnId": 79127,
+      "name": "Centroamérica",
+      "count": 14
+    },
+    {
+      "columnId": 79134,
+      "name": "Honduras",
+      "count": 8
+    },
+    {
+      "columnId": 79145,
+      "name": "El Salvador",
+      "count": 8
+    },
+    {
+      "columnId": 79147,
+      "name": "República Dominicana",
+      "count": 20
+    },
+    {
+      "columnId": 76193,
+      "name": "Noticias",
+      "count": 5
+    },
+    {
+      "columnId": 77977,
+      "name": "Full HD",
+      "count": 14
+    },
+    {
+      "columnId": 76204,
+      "name": "HD+(265)",
+      "count": 4
+    },
+    {
+      "columnId": 76198,
+      "name": "PlayBack",
+      "count": 0
+    },
+    {
+      "columnId": 76186,
+      "name": "NFL PASS",
+      "count": 14
+    },
+    {
+      "columnId": 76184,
+      "name": "NBA PASS",
+      "count": 11
+    },
+    {
+      "columnId": 76195,
+      "name": "MLB PASS",
+      "count": 14
+    },
+    {
+      "columnId": 76196,
+      "name": "Cultura",
+      "count": 11
+    },
+    {
+      "columnId": 76183,
+      "name": "Música",
+      "count": 15
+    },
+    {
+      "columnId": 79146,
+      "name": "Infantil",
+      "count": 10
+    },
+    {
+      "columnId": 79148,
+      "name": "Religioso",
+      "count": 5
+    },
+    {
+      "columnId": 76192,
+      "name": "☆ Desde Internet",
+      "count": 25
+    },
+    {
+      "columnId": 76200,
+      "name": "EVENTOS PPV",
+      "count": 1
+    },
+    {
+      "columnId": 76189,
+      "name": "24/7",
+      "count": 95
+    },
+    {
+      "columnId": 76208,
+      "name": "18+",
+      "count": 44
+    }
+  ],
+  "leftovers": [
+    {
+      "code": "cyx_0EA669A04973404263A",
+      "name": "Adult Swim",
+      "number": 25
+    },
+    {
+      "code": "cyx_3842350890182664333549468737",
+      "name": "A&E US HD",
+      "number": 38
+    },
+    {
+      "code": "cyx_8952542186693808714876417246",
+      "name": "Arte1",
+      "number": 54
+    },
+    {
+      "code": "cyx_8970072038214286908101",
+      "name": "AE EAST",
+      "number": 56
+    },
+    {
+      "code": "cyx_708794086562513481180041",
+      "name": "Al Jazeera",
+      "number": 57
+    },
+    {
+      "code": "cyx_1F17126C7B74C5B348ACB",
+      "name": "a mas+ GUATE HD",
+      "number": 62
+    },
+    {
+      "code": "cyx_70956775862152570928",
+      "name": "AMAZON PRIME HD",
+      "number": 63
+    },
+    {
+      "code": "cyx_92325446644417788526047",
+      "name": "BET EAST",
+      "number": 131
+    },
+    {
+      "code": "cyx_13468418948245322141278",
+      "name": "BET WEST",
+      "number": 132
+    },
+    {
+      "code": "cyx_69798148959626563942038",
+      "name": "BET CARIBE",
+      "number": 133
+    },
+    {
+      "code": "cyx_59323635069651675305023",
+      "name": "BET CANADA",
+      "number": 134
+    },
+    {
+      "code": "cyx_48617009610508474086243",
+      "name": "BET COUNTRY CARIBE",
+      "number": 136
+    },
+    {
+      "code": "cyx_695173186838248680387528",
+      "name": "BAND NEWS HD",
+      "number": 138
+    },
+    {
+      "code": "cyx_9970916516509359080957366369",
+      "name": "CANAL TRO HD",
+      "number": 204
+    },
+    {
+      "code": "cyx_565337634321465683603549",
+      "name": "CANAL 6 MX HD",
+      "number": 230
+    },
+    {
+      "code": "cyx_5692229663542428485998242737",
+      "name": "CANAL 7 Jujuy HD",
+      "number": 231
+    },
+    {
+      "code": "cyx_6666777055565546660764790325",
+      "name": "CANAL 8 NIC HD",
+      "number": 232
+    },
+    {
+      "code": "cyx-ElNueve",
+      "name": "CANAL 9 HD",
+      "number": 233
+    },
+    {
+      "code": "cyx_9662224081879738441597234631",
+      "name": "CANAL 11 GUA HD",
+      "number": 240
+    },
+    {
+      "code": "cyx_754904644950295",
+      "name": "CANAL 13 GUATEMALA HD",
+      "number": 247
+    },
+    {
+      "code": "cyx_3185969685026213646213526618",
+      "name": "CANAL 19 SV HD",
+      "number": 257
+    },
+    {
+      "code": "cyx_06947973233503700151",
+      "name": "CANAL 28",
+      "number": 263
+    },
+    {
+      "code": "cyx_92423458228047751463",
+      "name": "CANAL CLARO HD",
+      "number": 265
+    },
+    {
+      "code": "cyx_1869185069607318600999482401",
+      "name": "CANAL 41 RD HD",
+      "number": 267
+    },
+    {
+      "code": "cyx_724693364955735122615519",
+      "name": "Canal Pro HD",
+      "number": 268
+    },
+    {
+      "code": "cyx_24777575042436395367504",
+      "name": "CNBC WORLD",
+      "number": 287
+    },
+    {
+      "code": "cyx_66699135991470938",
+      "name": "CINE POP HD",
+      "number": 303
+    },
+    {
+      "code": "cyx_43135406385667877652",
+      "name": "Cinema Platino",
+      "number": 309
+    },
+    {
+      "code": "cyx_37030034496230278224",
+      "name": "Chespirito",
+      "number": 316
+    },
+    {
+      "code": "cyx_1243134478338588905974360353",
+      "name": "CHU CHU TV",
+      "number": 317
+    },
+    {
+      "code": "cyx_0983387231375001714187531833",
+      "name": "China CGTN Docu HD",
+      "number": 322
+    },
+    {
+      "code": "cyx_3209563378918568762214019958",
+      "name": "Cancao Nova",
+      "number": 340
+    },
+    {
+      "code": "cyx_DDF490BFAF3D882ACE33C",
+      "name": "Directv Sports PC",
+      "number": 389
+    },
+    {
+      "code": "cyx_62266064577376497783",
+      "name": "Dragon Ball Z",
+      "number": 438
+    },
+    {
+      "code": "cyx_54348069811567915185",
+      "name": "Dragon Ball GT",
+      "number": 439
+    },
+    {
+      "code": "cyx_7132793619908685278019904087",
+      "name": "Dreamworks HD",
+      "number": 440
+    },
+    {
+      "code": "cyx_16337427316851429558101",
+      "name": "E! WEST HD",
+      "number": 573
+    },
+    {
+      "code": "cyx_598258625572216196390093",
+      "name": "Elim TV",
+      "number": 602
+    },
+    {
+      "code": "cyx_yfdgUeQ1UcONnAqtlsd_720p",
+      "name": "Ebenezercofradia",
+      "number": 609
+    },
+    {
+      "code": "cyx_38758366887144490479",
+      "name": "Fox 40 news",
+      "number": 640
+    },
+    {
+      "code": "cyx_521A17DB1052DCE43EF71BCF",
+      "name": "FOX RACING HD",
+      "number": 648
+    },
+    {
+      "code": "cyx_72B67A1DDE9F44A7322D2F",
+      "name": "FOX SOCCER PLUS HD",
+      "number": 650
+    },
+    {
+      "code": "cyx_91F00C12A43F796F2A0038C9",
+      "name": "FOX DEPORTE USA HD",
+      "number": 652
+    },
+    {
+      "code": "cyx_91419304529970618993779",
+      "name": "FXI",
+      "number": 668
+    },
+    {
+      "code": "cyx_BF30AB0189D8D01547B",
+      "name": "Gol Peru PC",
+      "number": 697
+    },
+    {
+      "code": "cyx_3124300610794834376008473821",
+      "name": "HGTV ESPAÑOL HD",
+      "number": 736
+    },
+    {
+      "code": "cyx_80280850301742578664178",
+      "name": "History USA ESP HD",
+      "number": 740
+    },
+    {
+      "code": "cyx_0523049259487642748507538069",
+      "name": "Hipodromo Presidente Remon",
+      "number": 751
+    },
+    {
+      "code": "cyx_4314496117260385929809474398",
+      "name": "I-SAT",
+      "number": 756
+    },
+    {
+      "code": "cyx_1078926623880829189263509763",
+      "name": "MOVISTAR ESTRENOS 2 HD",
+      "number": 845
+    },
+    {
+      "code": "cyx_845657591556308469138788",
+      "name": "MULTIMEDIOS MX HD",
+      "number": 858
+    },
+    {
+      "code": "cyx_20248179036156072472",
+      "name": "My Time",
+      "number": 874
+    },
+    {
+      "code": "cyx_2128919634909622747751365604",
+      "name": "Multivision",
+      "number": 876
+    },
+    {
+      "code": "cyx_0534280804203262726404108425",
+      "name": "Multicinema HD",
+      "number": 883
+    },
+    {
+      "code": "cyx_18699693060496379",
+      "name": "MLS Season Pass",
+      "number": 887
+    },
+    {
+      "code": "cyx_794E0B7009FE0B8E78CF5",
+      "name": "MLS Season Pass 2",
+      "number": 888
+    },
+    {
+      "code": "cyx_2F223080045CC05E1A0",
+      "name": "MLS Season Pass 3",
+      "number": 889
+    },
+    {
+      "code": "cyx_936701715188658277607065",
+      "name": "MULTIPREMIER HD",
+      "number": 893
+    },
+    {
+      "code": "cyx_64DA5223A23C5DC00C",
+      "name": "Manavision",
+      "number": 894
+    },
+    {
+      "code": "cyx_883999437983566304647695",
+      "name": "NBC",
+      "number": 912
+    },
+    {
+      "code": "cyx_FFD05B1A498Fb34cAD32DBFBCE5F",
+      "name": "NICK MX HD",
+      "number": 928
+    },
+    {
+      "code": "cyx_7590630879284784089835726322",
+      "name": "NICK SUR HD",
+      "number": 929
+    },
+    {
+      "code": "cyx_D04DBE3260CF16B5BE0D3FB",
+      "name": "NICK MUSIC HD",
+      "number": 931
+    },
+    {
+      "code": "cyx_4008474515028930864335454565",
+      "name": "NICK Central HD",
+      "number": 935
+    }
+  ]
+}

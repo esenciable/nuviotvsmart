@@ -1,11 +1,13 @@
-// Category dedupe contract for the Live TV screen (owner-approved rule).
-// Pure functions only: no DOM, no network, no i18n — node --test must run
-// fully offline. Ownership: each channel lives in exactly ONE category — a
-// SPECIFIC category beats the generic catalogue (`ChannelList`,
-// case-insensitive), and among specific categories the FIRST one in catalog
-// order that contains the channel owns it. The generic catalogue shows only
-// the channels no specific category owns. Search, favourites and recents keep
-// using the FULL set (no category dedupe).
+// Category dedupe contract for the Live TV screen — GENERATED INDEX edition.
+// The ownership rule no longer runs on the TV: `npm run catalog:index`
+// computes it once on a developer machine (scripts/magis-catalog-index.mjs)
+// and ships the answer as js/core/magis/catalog-index.json. The screen only
+// READS that index: rail counts come from it (no portal call), the generic
+// ChannelList renders its leftovers from it (the 500-channel catalogue page is
+// never fetched at runtime), and there is no background walk and no runtime
+// ownership computation anywhere in the screen. Categories load on demand —
+// one fetch each. Search, favourites and recents keep using the loaded set
+// (no category dedupe). Pure functions only: node --test runs fully offline.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -13,253 +15,300 @@ import { readFileSync } from "node:fs";
 import {
   GENERIC_CATEGORY_NAME,
   isGenericCategoryName,
-  computeCategoryOwnership,
-  filterChannelsByOwnership,
+  isUsableCatalogIndex,
+  catalogCountsFromIndex,
+  leftoverChannelsFromIndex,
+  findGenericCategory,
   buildRailItems,
   channelMatchesQuery,
   categoryRailId
 } from "../js/ui/screens/live/liveScreenMethods-02-render.js";
 
 // Catalog fixtures: Deportes (42) then Cine (43) then the generic
-// ChannelList (7). Channels may span categories; ids are the stable ids.
+// ChannelList (7). The index carries the counts AFTER dedupe (see
+// tests/test-magis-catalog-index.mjs): espn is owned by Deportes, so Cine
+// shows 2 and the generic keeps only ztv + orphan.
 const CATEGORIES = [
   { columnId: 42, name: "Deportes" },
   { columnId: 43, name: "Cine y Series" },
   { columnId: 7, name: "ChannelList" }
 ];
-const DEPORTES = [
-  { id: "magis:live:espn", name: "ESPN" },
-  { id: "magis:live:fox", name: "Fox Sports" }
-];
-const CINE = [
-  { id: "magis:live:hbo", name: "HBO" },
-  { id: "magis:live:espn", name: "ESPN" }, // also in Deportes: Deportes (first specific) owns it
-  { id: "magis:live:tcm", name: "TCM" }
-];
-const CHANNELLIST = [
-  { id: "magis:live:espn", name: "ESPN" }, // owned by Deportes
-  { id: "magis:live:hbo", name: "HBO" }, // owned by Cine y Series
-  { id: "magis:live:ztv", name: "ZTV" }, // only here: the generic keeps it
-  { id: "magis:live:orphan", name: "Orphan" } // only here too
-];
+const INDEX_COUNTS = new Map([
+  ["42", 2],
+  ["43", 2],
+  ["7", 2]
+]);
+const CACHES = new Map([
+  ["42", [{ id: "magis:live:espn" }, { id: "magis:live:fox" }]],
+  ["premiumtv:TCS", [{ id: "premiumtv:x" }, { id: "premiumtv:y" }]]
+]);
+const USABLE_INDEX = {
+  generatedAt: "2026-02-11T00:00:00.000Z",
+  genericCategoryName: "ChannelList",
+  categories: [
+    { columnId: 42, name: "Deportes", count: 2 },
+    { columnId: 43, name: "Cine y Series", count: 2 },
+    { columnId: 7, name: "ChannelList", count: 2 }
+  ],
+  leftovers: [
+    { code: "ztv", name: "ZTV", number: 5 },
+    { code: "orphan", name: "Orphan", number: null }
+  ]
+};
 
-function ownershipFor(caches) {
-  return computeCategoryOwnership({ categories: CATEGORIES, channelsByColumn: caches });
-}
+const renderSource = () =>
+  readFileSync(new URL("../js/ui/screens/live/liveScreenMethods-02-render.js", import.meta.url), "utf8");
+const mountSource = () =>
+  readFileSync(new URL("../js/ui/screens/live/liveScreenMethods-01-mount-and-load.js", import.meta.url), "utf8");
 
-describe("isGenericCategoryName (the catalogue page, not a genre)", () => {
-  test("matches the Magis catalogue name case-insensitively", () => {
-    assert.equal(isGenericCategoryName("ChannelList"), true);
-    assert.equal(isGenericCategoryName("channellist"), true);
-    assert.equal(isGenericCategoryName("CHANNELLIST"), true);
-    assert.equal(isGenericCategoryName(" ChannelList "), true);
+describe("no runtime ownership computation (the rule lives in the generated index)", () => {
+  test("computeCategoryOwnership and filterChannelsByOwnership are gone from the screen", () => {
+    for (const source of [renderSource(), mountSource()]) {
+      assert.doesNotMatch(source, /computeCategoryOwnership/);
+      assert.doesNotMatch(source, /filterChannelsByOwnership/);
+    }
   });
 
-  test("never matches a specific genre or a differently-spelled name", () => {
-    assert.equal(isGenericCategoryName("Deportes"), false);
-    assert.equal(isGenericCategoryName("Channel List"), false);
-    assert.equal(isGenericCategoryName("Channels"), false);
-    assert.equal(isGenericCategoryName(""), false);
-    assert.equal(isGenericCategoryName(null), false);
+  test("the ownership memo invalidation is gone from the background release too", () => {
+    assert.doesNotMatch(mountSource(), /_ownershipSignature|_categoryOwnership/);
+  });
+});
+
+describe("no background walk (categories load on demand, one fetch each)", () => {
+  test("preloadRemainingCategories is gone from the mount module", () => {
+    assert.doesNotMatch(mountSource(), /preloadRemainingCategories/);
   });
 
-  test("the constant is the documented catalogue page name", () => {
+  test("the mount wires the generated index instead", () => {
+    const source = mountSource();
+    assert.match(source, /loadCatalogIndex\(\)/);
+    assert.match(source, /applyCatalogIndex\(/);
+  });
+
+  test("selecting a rail row loads exactly one category — no iteration over all categories", () => {
+    const source = mountSource();
+    const selectStart = source.indexOf("selectRailItem(railId", 0);
+    assert.ok(selectStart >= 0, "selectRailItem exists");
+    const selectPath = source.slice(selectStart); // through the end of the mount module
+    assert.ok(selectPath.includes("loadChannelsForCategory"), "category rows load their own list");
+    assert.doesNotMatch(selectPath, /for \(const .* of this\.categories/);
+  });
+});
+
+describe("isUsableCatalogIndex (absent/stale index degrades, never crashes)", () => {
+  test("a generated index (non-empty generatedAt) is usable", () => {
+    assert.equal(isUsableCatalogIndex(USABLE_INDEX), true);
+  });
+
+  test("the empty placeholder (generatedAt null) is NOT usable: the screen falls back to on-demand loads", () => {
+    assert.equal(
+      isUsableCatalogIndex({ generatedAt: null, genericCategoryName: "ChannelList", categories: [], leftovers: [] }),
+      false
+    );
+    assert.equal(isUsableCatalogIndex({ generatedAt: "", genericCategoryName: "ChannelList", categories: [], leftovers: [] }), false);
+  });
+
+  test("garbage input is not usable and never throws", () => {
+    assert.equal(isUsableCatalogIndex(null), false);
+    assert.equal(isUsableCatalogIndex(undefined), false);
+    assert.equal(isUsableCatalogIndex("nope"), false);
+    assert.equal(isUsableCatalogIndex({}), false);
+    assert.equal(isUsableCatalogIndex({ generatedAt: "x" }), false); // categories missing
+  });
+});
+
+describe("catalogCountsFromIndex (rail counts with no portal call)", () => {
+  test("maps columnId -> count for a usable index", () => {
+    const counts = catalogCountsFromIndex(USABLE_INDEX);
+    assert.deepEqual([...counts.entries()].sort(), [
+      ["42", 2],
+      ["43", 2],
+      ["7", 2]
+    ]);
+  });
+
+  test("an unusable index yields an empty map: every Magis count renders '…'", () => {
+    for (const index of [null, undefined, { generatedAt: null, categories: [] }]) {
+      assert.equal(catalogCountsFromIndex(index).size, 0);
+    }
+  });
+
+  test("malformed entries are skipped and counts clamp to non-negative integers", () => {
+    const counts = catalogCountsFromIndex({
+      generatedAt: "2026-02-11T00:00:00.000Z",
+      genericCategoryName: "ChannelList",
+      categories: [null, { columnId: "", name: "x", count: 3 }, { columnId: 9, name: "y", count: -4 }, { columnId: 11, name: "z", count: 7.9 }],
+      leftovers: []
+    });
+    assert.deepEqual([...counts.entries()], [["9", 0], ["11", 7]]);
+  });
+});
+
+describe("leftoverChannelsFromIndex (the generic catalogue renders without fetching the 500)", () => {
+  test("maps leftovers to stable magis:live channel rows", () => {
+    const channels = leftoverChannelsFromIndex(USABLE_INDEX);
+    assert.deepEqual(
+      channels.map((channel) => [channel.id, channel.code, channel.name, channel.number]),
+      [
+        ["magis:live:ztv", "ztv", "ZTV", 5],
+        ["magis:live:orphan", "orphan", "Orphan", null]
+      ]
+    );
+    for (const channel of channels) {
+      assert.equal(channel.groupName, "ChannelList"); // the generic section, for the meta line
+    }
+  });
+
+  test("duplicate codes collapse into one row", () => {
+    const channels = leftoverChannelsFromIndex({
+      generatedAt: "x",
+      genericCategoryName: "ChannelList",
+      categories: [],
+      leftovers: [
+        { code: "ztv", name: "ZTV", number: 5 },
+        { code: "ztv", name: "ZTV dup", number: 6 }
+      ]
+    });
+    assert.equal(channels.length, 1);
+    assert.equal(channels[0].name, "ZTV");
+  });
+
+  test("an unusable index yields NO rows (the generic selection falls back to the portal fetch)", () => {
+    for (const index of [null, undefined, { generatedAt: null, categories: [], leftovers: [{ code: "ztv", name: "ZTV", number: 5 }] }]) {
+      assert.deepEqual(leftoverChannelsFromIndex(index), []);
+    }
+  });
+
+  test("malformed leftovers are skipped; a blank name falls back to the placeholder", () => {
+    const channels = leftoverChannelsFromIndex({
+      generatedAt: "x",
+      genericCategoryName: "ChannelList",
+      categories: [],
+      leftovers: [null, { code: "", name: "no code" }, { code: "ok", name: "  " }]
+    });
+    assert.deepEqual(channels.map((channel) => channel.code), ["ok"]);
+    assert.equal(channels[0].name, "Canal en vivo");
+  });
+});
+
+describe("generic catalogue identification (from the index, not a guess)", () => {
+  test("matches the index's genericCategoryName case-insensitively", () => {
+    const generic = findGenericCategory(CATEGORIES, "channellist");
+    assert.equal(generic?.columnId, 7);
+    assert.equal(findGenericCategory(CATEGORIES, "ChannelList")?.columnId, 7);
+  });
+
+  test("no match -> null (the generic selection stays on the on-demand fetch path)", () => {
+    assert.equal(findGenericCategory(CATEGORIES, "Not The Catalogue"), null);
+    assert.equal(findGenericCategory([], "ChannelList"), null);
+    assert.equal(findGenericCategory(null, "ChannelList"), null);
+  });
+
+  test("the shared constant is still the documented catalogue page name", () => {
     assert.equal(GENERIC_CATEGORY_NAME, "ChannelList");
+    assert.equal(isGenericCategoryName(" channellist "), true);
   });
 });
 
-describe("computeCategoryOwnership (specific beats generic, first specific wins)", () => {
-  test("a channel in a specific category and the generic catalogue is owned by the SPECIFIC one", () => {
-    const owners = ownershipFor(
-      new Map([
-        ["42", DEPORTES],
-        ["7", CHANNELLIST]
-      ])
-    );
-    assert.equal(owners.get("magis:live:espn"), "42");
-  });
-
-  test("among specific categories, the FIRST one in catalog order wins ties", () => {
-    const owners = ownershipFor(
-      new Map([
-        ["42", DEPORTES],
-        ["43", CINE]
-      ])
-    );
-    assert.equal(owners.get("magis:live:espn"), "42"); // Deportes precedes Cine y Series
-    assert.equal(owners.get("magis:live:hbo"), "43");
-  });
-
-  test("a channel only in the generic catalogue stays there (owned by ChannelList)", () => {
-    const owners = ownershipFor(new Map([["7", CHANNELLIST]]));
-    assert.equal(owners.get("magis:live:ztv"), "7");
-    assert.equal(owners.get("magis:live:orphan"), "7");
-  });
-
-  test("a channel in NO category has no owner", () => {
-    const owners = ownershipFor(new Map([["42", DEPORTES]]));
-    assert.equal(owners.has("magis:live:nowhere"), false);
-    assert.equal(owners.get("magis:live:nowhere"), undefined);
-  });
-
-  test("uncached categories contribute nothing (progressive: ownership refines as the preload walks)", () => {
-    // Only the generic is walked so far: it still shows everything.
-    const before = ownershipFor(new Map([["7", CHANNELLIST]]));
-    assert.equal(before.get("magis:live:espn"), "7");
-    // Deportes' cache arrives: its channels are stolen from the generic, never given back.
-    const after = ownershipFor(
-      new Map([
-        ["42", DEPORTES],
-        ["7", CHANNELLIST]
-      ])
-    );
-    assert.equal(after.get("magis:live:espn"), "42");
-    assert.equal(after.get("magis:live:ztv"), "7");
-  });
-});
-
-describe("filterChannelsByOwnership (a category list excludes channels owned by another)", () => {
-  const owners = ownershipFor(
-    new Map([
-      ["42", DEPORTES],
-      ["43", CINE],
-      ["7", CHANNELLIST]
-    ])
-  );
-
-  test("a specific category keeps exactly the channels it owns", () => {
-    assert.deepEqual(filterChannelsByOwnership(CINE, "43", owners).map((c) => c.id), ["magis:live:hbo", "magis:live:tcm"]);
-    assert.deepEqual(filterChannelsByOwnership(DEPORTES, "42", owners).map((c) => c.id), ["magis:live:espn", "magis:live:fox"]);
-  });
-
-  test("the generic ChannelList shows ONLY the channels with no specific owner", () => {
-    assert.deepEqual(filterChannelsByOwnership(CHANNELLIST, "7", owners).map((c) => c.id), ["magis:live:ztv", "magis:live:orphan"]);
-  });
-
-  test("does not mutate the input list", () => {
-    assert.equal(CHANNELLIST.length, 4);
-  });
-});
-
-describe("union-without-duplicates invariant (no channel lost, none repeated)", () => {
-  const caches = new Map([
-    ["42", DEPORTES],
-    ["43", CINE],
-    ["7", CHANNELLIST]
-  ]);
-  const owners = ownershipFor(caches);
-
-  test("the union of all filtered category lists equals the union of the raw caches, exactly once each", () => {
-    const allIds = new Set();
-    for (const [columnId, list] of caches) {
-      for (const channel of filterChannelsByOwnership(list, columnId, owners)) {
-        const id = String(channel.id);
-        assert.equal(allIds.has(id), false, `channel ${id} rendered twice`);
-        allIds.add(id);
-      }
-    }
-    const rawIds = new Set();
-    for (const list of caches.values()) for (const channel of list) rawIds.add(String(channel.id));
-    assert.equal(allIds.size, rawIds.size);
-    for (const id of rawIds) assert.equal(allIds.has(id), true, `channel ${id} was lost`);
-  });
-
-  test("the same invariant holds while the walk is partial (generic cached only, then one specific)", () => {
-    for (const partial of [new Map([["7", CHANNELLIST]]), new Map([["42", DEPORTES], ["7", CHANNELLIST]])]) {
-      const partialOwners = ownershipFor(partial);
-      const seen = new Set();
-      for (const [columnId, list] of partial) {
-        for (const channel of filterChannelsByOwnership(list, columnId, partialOwners)) {
-          const id = String(channel.id);
-          assert.equal(seen.has(id), false, `channel ${id} duplicated in partial state`);
-          seen.add(id);
-        }
-      }
-    }
-  });
-
-  test("progressive refinement only REMOVES items from a category list, never re-adds them", () => {
-    const before = filterChannelsByOwnership(CHANNELLIST, "7", ownershipFor(new Map([["7", CHANNELLIST]])));
-    const after = filterChannelsByOwnership(CHANNELLIST, "7", ownershipFor(new Map([["42", DEPORTES], ["7", CHANNELLIST]])));
-    const afterIds = new Set(after.map((c) => c.id));
-    for (const channel of after) assert.equal(before.some((c) => c.id === channel.id), true);
-    assert.equal(afterIds.size < before.length, true); // strictly refined
-  });
-});
-
-describe("rail counts reflect the deduplicated lists (… while unknown)", () => {
-  test("a cached category's count is its deduplicated length; an uncached one stays null", () => {
-    const caches = new Map([
-      ["42", DEPORTES],
-      ["7", CHANNELLIST]
-    ]);
-    const items = buildRailItems({ categories: CATEGORIES, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
+describe("rail counts reflect the generated index (dedupe already applied offline)", () => {
+  test("a Magis category's count comes from the index even before its channels are loaded", () => {
+    const items = buildRailItems({ categories: CATEGORIES, channelsByColumn: new Map(), catalogCounts: INDEX_COUNTS, favoriteCount: 0, recentCount: 0 });
     const deportes = items.find((item) => item.railId === categoryRailId(42));
-    const cines = items.find((item) => item.railId === categoryRailId(43));
     const generic = items.find((item) => item.railId === categoryRailId(7));
-    assert.equal(deportes.count, 2); // Deportes owns both of its channels
-    assert.equal(cines.count, null); // not walked yet: "…"
-    // 4 raw minus espn (owned by Deportes); hbo/z/orphan have no cached specific owner yet.
-    assert.equal(generic.count, 3);
+    assert.equal(deportes.count, 2); // from the index — no portal call
+    assert.equal(generic.count, 2); // the leftovers count
   });
 
-  test("counts refine when a specific category's cache arrives (channels leave the generic once)", () => {
-    const beforeItems = buildRailItems({
+  test("a missing index entry renders '…' (degraded, never a fake 0)", () => {
+    const items = buildRailItems({
       categories: CATEGORIES,
-      channelsByColumn: new Map([["7", CHANNELLIST]]),
+      channelsByColumn: new Map(),
+      catalogCounts: new Map([["42", 2]]),
       favoriteCount: 0,
       recentCount: 0
     });
-    const genericBefore = beforeItems.find((item) => item.railId === categoryRailId(7));
-    assert.equal(genericBefore.count, 4); // nothing walked yet: shows as-is
-
-    const afterItems = buildRailItems({
-      categories: CATEGORIES,
-      channelsByColumn: new Map([
-        ["42", DEPORTES],
-        ["7", CHANNELLIST]
-      ]),
-      favoriteCount: 0,
-      recentCount: 0
-    });
-    const genericAfter = afterItems.find((item) => item.railId === categoryRailId(7));
-    assert.equal(genericAfter.count, 3); // espn left the generic (owned by Deportes)
+    assert.equal(items.find((item) => item.railId === categoryRailId(43)).count, null);
+    assert.equal(items.find((item) => item.railId === categoryRailId(7)).count, null);
   });
 
-  test("a source's count is the sum of its deduplicated category counts once every one is cached", () => {
-    const caches = new Map([
-      ["42", DEPORTES],
-      ["43", CINE],
-      ["7", CHANNELLIST]
-    ]);
-    const items = buildRailItems({ categories: CATEGORIES, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
+  test("PremiumTV is unaffected: its groups do not overlap and keep the on-demand cache count", () => {
+    const categories = [...CATEGORIES, { columnId: "premiumtv:TCS", name: "TCS" }];
+    const withoutCache = buildRailItems({ categories, channelsByColumn: new Map(), catalogCounts: INDEX_COUNTS, favoriteCount: 0, recentCount: 0 });
+    const premiumPending = withoutCache.find((item) => item.railId === categoryRailId("premiumtv:TCS"));
+    assert.equal(premiumPending.count, null); // not cached yet: "…"
+    assert.equal(premiumPending.loading, true);
+
+    const withCache = buildRailItems({ categories, channelsByColumn: CACHES, catalogCounts: INDEX_COUNTS, favoriteCount: 0, recentCount: 0 });
+    const premium = withCache.find((item) => item.railId === categoryRailId("premiumtv:TCS"));
+    assert.equal(premium.count, 2);
+    assert.equal(premium.loading, false);
+  });
+
+  test("a Magis source's count is the sum of its index counts once every one is present", () => {
+    const items = buildRailItems({ categories: CATEGORIES, channelsByColumn: new Map(), catalogCounts: INDEX_COUNTS, favoriteCount: 0, recentCount: 0 });
     const magis = items.find((item) => item.type === "source");
-    // Deportes 2 (both owned) + Cine 2 (hbo, tcm; espn owned by Deportes) +
-    // ChannelList 2 (ztv, orphan) = 6 unique channels of the 7 raw entries.
-    assert.equal(magis.count, 6);
+    assert.equal(magis.count, 6); // 2 + 2 + 2 deduped channels
+    assert.equal(magis.loading, false);
+  });
+
+  test("a source with any missing count stays '…' (no fake sums)", () => {
+    const items = buildRailItems({
+      categories: CATEGORIES,
+      channelsByColumn: new Map(),
+      catalogCounts: new Map([["42", 2]]),
+      favoriteCount: 0,
+      recentCount: 0
+    });
+    assert.equal(items.find((item) => item.type === "source").count, null);
   });
 });
 
-describe("search, favourites and recents keep the FULL set (no category dedupe)", () => {
-  test("a channel that lives in Deportes is still findable by search", () => {
+describe("the generic catalogue renders leftovers through the mount's on-demand path", () => {
+  test("loadChannelsForCategory serves the generic column from the index BEFORE any repository call", () => {
+    const source = mountSource();
+    const loadStart = source.indexOf("async loadChannelsForCategory");
+    const fetchStart = source.indexOf("await liveRepository.listChannels", loadStart);
+    assert.ok(loadStart >= 0 && fetchStart > loadStart, "the repository fetch exists for regular categories");
+    const beforeFetch = source.slice(loadStart, fetchStart);
+    assert.match(beforeFetch, /catalogGenericColumnId/);
+    assert.match(beforeFetch, /leftoverChannelsFromIndex/);
+    assert.match(beforeFetch, /channelsByColumn\.set\(/, "the leftovers are cached like any category list");
+  });
+
+  test("an unusable index leaves the generic on the normal fetch path (degradation)", () => {
+    // The generic branch only exists when the index identified the category:
+    // the guard reads this.catalogGenericColumnId, which applyCatalogIndex
+    // clears when the index is unusable.
+    const source = mountSource();
+    assert.match(source, /applyCatalogIndex/);
+    assert.match(source, /isUsableCatalogIndex/);
+  });
+
+  test("the category branch of refreshVisibleChannels renders the cached list as-is (no runtime filter)", () => {
+    const start = mountSource().indexOf("refreshVisibleChannels()");
+    const end = mountSource().indexOf("selectRailItem(", start);
+    const body = mountSource().slice(start, end);
+    const catStart = body.indexOf('selection.startsWith("cat:")');
+    const catBody = body.slice(catStart);
+    assert.match(catBody, /caches\.get\(columnId\)/);
+    assert.doesNotMatch(catBody, /Ownership/);
+  });
+});
+
+describe("search, favourites and recents keep the loaded set (no category dedupe)", () => {
+  test("a channel is still findable by accent-insensitive search", () => {
     assert.equal(channelMatchesQuery({ name: "ESPN Deportes" }, "espn"), true);
     assert.equal(channelMatchesQuery({ name: "Fox Sports" }, "sports"), true);
   });
 
-  test("the search pipeline in the mount module builds the raw union and never applies ownership filtering", () => {
-    const mountSource = readFileSync(
-      new URL("../js/ui/screens/live/liveScreenMethods-01-mount-and-load.js", import.meta.url),
-      "utf8"
-    );
-    const start = mountSource.indexOf("refreshVisibleChannels()");
-    const end = mountSource.indexOf("selectRailItem(", start);
-    assert.ok(start >= 0 && end > start, "refreshVisibleChannels exists before selectRailItem");
-    const body = mountSource.slice(start, end);
+  test("the search pipeline in the mount module builds the raw union of the loaded caches", () => {
+    const source = mountSource();
+    const start = source.indexOf("refreshVisibleChannels()");
+    const end = source.indexOf("selectRailItem(", start);
+    const body = source.slice(start, end);
     const searchStart = body.indexOf("if (query)");
     const searchEnd = body.indexOf("} else {", searchStart);
     const searchBranch = body.slice(searchStart, searchEnd);
     assert.match(searchBranch, /union/);
-    assert.doesNotMatch(searchBranch, /filterChannelsByOwnership/);
-    assert.match(body, /filterChannelsByOwnership/); // the category branch does dedupe
   });
 });

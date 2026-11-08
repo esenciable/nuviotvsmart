@@ -20,16 +20,31 @@ function currentRouteSafe(router) {
 
 // Mount and data loading for the reference layout: the screen renders its
 // skeleton immediately, then paints the left rail and the first category's
-// channels as soon as they arrive, while the remaining categories preload in
-// the background without ever blocking input. Per-category COUNTS in the rail
-// are read from those same cached lists — never from extra portal calls; a
-// pending category renders "…" until its background load lands.
+// channels as soon as they arrive. Magis rail counts and the generic
+// catalogue's leftovers come from the GENERATED catalog index shipped with
+// the app (js/core/magis/catalog-index.json, built offline by `npm run
+// catalog:index`) — the screen never walks all categories in the background
+// and never computes channel ownership at runtime. Categories load on demand
+// when selected: one fetch each, no speculative loading. An absent/stale
+// index degrades gracefully: counts render "…", the generic catalogue falls
+// back to its portal fetch, and tune-in surfaces the real portal error.
 //
 // Every repository call is abortable through a token + controller pair so
 // leaving the screen or switching categories cancels the pending work.
 export function createLiveScreenMethods01() {
-  const { Router, ScreenUtils, liveRepository, rememberLiveSelection, readRememberedLiveSelection, resolveLiveSelectionRestore } =
-    internals;
+  const {
+    Router,
+    ScreenUtils,
+    liveRepository,
+    rememberLiveSelection,
+    readRememberedLiveSelection,
+    resolveLiveSelectionRestore,
+    loadCatalogIndex,
+    isUsableCatalogIndex,
+    catalogCountsFromIndex,
+    leftoverChannelsFromIndex,
+    findGenericCategory
+  } = internals;
 
   return {
     async mount(params = {}, navigationContext = {}) {
@@ -59,6 +74,12 @@ export function createLiveScreenMethods01() {
       this.channelsError = "";
       this.notice = "";
       this.tuningChannelId = "";
+      // The generated Magis catalog index: rail counts + the generic
+      // catalogue's leftovers. Filled by applyCatalogIndex on mount; an
+      // unusable index keeps these at their empty defaults.
+      this.catalogIndex = null;
+      this.catalogCounts = new Map();
+      this.catalogGenericColumnId = "";
       this.categoriesController = null;
       this.categoryLoadController = null;
       this.resolveController = null;
@@ -118,8 +139,11 @@ export function createLiveScreenMethods01() {
 
       // One controller per mount covers the categories call; switching
       // categories and tuning each own their dedicated controller below.
+      // The generated catalog index (local JSON, no network) travels in
+      // parallel with the categories call.
       const categoriesController = typeof AbortController === "function" ? new AbortController() : null;
       this.categoriesController = categoriesController;
+      const catalogIndexPromise = loadCatalogIndex();
       const categories = await liveRepository.listCategories({
         signal: categoriesController?.signal || null
       });
@@ -145,6 +169,13 @@ export function createLiveScreenMethods01() {
         return;
       }
       this.categories = Array.isArray(categories.data) ? categories.data : [];
+      // Apply the generated index BEFORE any selection so the rail paints
+      // real counts and the generic catalogue can serve its leftovers.
+      const catalogIndex = await catalogIndexPromise;
+      if (token !== this.loadToken || Router.getCurrent() !== "live") {
+        return;
+      }
+      this.applyCatalogIndex(catalogIndex);
       this.render();
       if (this.categories.length) {
         // Restore WHERE the user was (the remembered rail id + focused row,
@@ -172,18 +203,32 @@ export function createLiveScreenMethods01() {
             this.selectRailItem(first.railId, { enterRows: false });
           }
         }
-        void this.preloadRemainingCategories(token);
       }
     },
 
-    async loadChannelsForCategory(columnId, { background = false } = {}) {
+    // Applies the generated Magis catalog index: per-category rail counts
+    // (already deduped offline) and the generic catalogue's column id. An
+    // absent/stale index (unusable) is a graceful degradation: counts stay
+    // "…", the generic catalogue is NOT identified (its selection falls back
+    // to the normal portal fetch) and nothing here can throw.
+    applyCatalogIndex(index) {
+      this.catalogIndex = isUsableCatalogIndex(index) ? index : null;
+      this.catalogCounts = catalogCountsFromIndex(this.catalogIndex);
+      this.catalogGenericColumnId = "";
+      if (this.catalogIndex) {
+        const generic = findGenericCategory(this.categories, this.catalogIndex.genericCategoryName);
+        this.catalogGenericColumnId = generic ? String(generic.columnId) : "";
+      }
+    },
+
+    async loadChannelsForCategory(columnId) {
       const key = String(columnId ?? "");
       if (!key) {
         return;
       }
       const cached = this.channelsByColumn.get(key);
       if (cached) {
-        if (!background && String(this.railSelection) === internals.categoryRailId(key)) {
+        if (String(this.railSelection) === internals.categoryRailId(key)) {
           this.channelsLoading = false;
           this.channelsError = "";
           this.channels = cached;
@@ -191,18 +236,29 @@ export function createLiveScreenMethods01() {
         }
         return;
       }
-
-      let controller = null;
-      if (!background) {
-        // A zap aborts the previous category's pending load so its late result
-        // can never overwrite the new selection.
-        this.categoryLoadController?.abort();
-        controller = typeof AbortController === "function" ? new AbortController() : null;
-        this.categoryLoadController = controller;
-        this.channelsLoading = true;
-        this.channelsError = "";
-        this.render();
+      // The generic catalogue page renders its LEFTOVERS from the generated
+      // index — the 500-channel portal page is never fetched at runtime. The
+      // branch only exists when a usable index identified the category; an
+      // unusable index falls through to the normal on-demand fetch below.
+      if (key === this.catalogGenericColumnId) {
+        const leftovers = leftoverChannelsFromIndex(this.catalogIndex);
+        this.channelsByColumn.set(key, leftovers);
+        if (String(this.railSelection) === internals.categoryRailId(key)) {
+          this.channelsLoading = false;
+          this.channelsError = "";
+          this.refreshVisibleChannels();
+        }
+        return;
       }
+
+      // A zap aborts the previous category's pending load so its late result
+      // can never overwrite the new selection.
+      this.categoryLoadController?.abort();
+      const controller = typeof AbortController === "function" ? new AbortController() : null;
+      this.categoryLoadController = controller;
+      this.channelsLoading = true;
+      this.channelsError = "";
+      this.render();
 
       const result = await liveRepository.listChannels({
         columnId,
@@ -213,15 +269,6 @@ export function createLiveScreenMethods01() {
       }
       if (result.status === "success") {
         this.channelsByColumn.set(key, result.data);
-      }
-      if (background) {
-        // Background preloads warm the cache for the rail counts, search,
-        // favourites and recents; when the visible list can grow from the new
-        // data, refresh it quietly.
-        if (result.status === "success" && this.listDependsOnAllCaches()) {
-          this.refreshVisibleChannels();
-        }
-        return;
       }
       if (Router.getCurrent() !== "live") {
         return;
@@ -238,29 +285,6 @@ export function createLiveScreenMethods01() {
         this.channels = result.data;
       }
       this.refreshVisibleChannels();
-    },
-
-    // True when the visible list reads from the UNION of the cached
-    // per-category lists (search, favourites) rather than one category,
-    // so a background cache arrival must refresh the visible rows and the
-    // rail counts. There is no aggregate selection anymore.
-    listDependsOnAllCaches() {
-      if (this.searchActive && this.searchQuery) {
-        return true;
-      }
-      const selection = String(this.railSelection ?? "");
-      return selection === internals.RAIL_FAVORITES_ID;
-    },
-
-    // True when the visible list is one CATEGORY's deduplicated list: every
-    // background cache arrival can refine ownership (rows may leave once),
-    // so the visible rows must be recomputed — from the caches only, never
-    // an extra portal call. Search/favourites keep the FULL set and are
-    // covered by listDependsOnAllCaches above.
-    categorySelectionDependsOnCaches() {
-      if (this.searchActive) return false;
-      const selection = String(this.railSelection ?? "");
-      return selection.startsWith("cat:");
     },
 
     // Recomputes this.channels from the current rail selection / search state
@@ -295,11 +319,10 @@ export function createLiveScreenMethods01() {
         } else if (selection && selection.startsWith("cat:")) {
           const columnId = selection.slice(4);
           const cached = caches.get(columnId);
-          // Category dedupe (owner-approved rule): the list excludes channels
-          // another category owns; the generic catalogue keeps only the
-          // channels no specific category owns. Ownership comes from the same
-          // per-category caches — never an extra portal call.
-          this.channels = internals.filterChannelsByOwnership(Array.isArray(cached) ? cached : [], columnId, this.categoryOwnership());
+          // The per-category lists are already deduplicated OFFLINE (the
+          // generic catalogue's cache holds exactly its index leftovers), so
+          // the cached list renders as-is — no runtime ownership computation.
+          this.channels = Array.isArray(cached) ? cached : [];
           this.channelsError = "";
         }
       }
@@ -331,7 +354,7 @@ export function createLiveScreenMethods01() {
       }
       this.railSelection = item.railId;
       if (item.type === "category") {
-        void this.loadChannelsForCategory(item.columnId, { background: false });
+        void this.loadChannelsForCategory(item.columnId);
       } else {
         // favorites / recents: pure cache recompute, no network.
         this.refreshVisibleChannels();
@@ -347,49 +370,6 @@ export function createLiveScreenMethods01() {
         this.setRailFocusIndex(index);
       }
       this.applyFocusState?.();
-    },
-
-    // Sequential background preload: the portal measures ~150 ms per call and
-    // 2 calls per category, so one category at a time (single await per
-    // iteration, no queue, no unbounded work) keeps the pace gentle while
-    // making later category switches instant from cache and filling the
-    // rail's per-category counts. The mount token stops it the moment the
-    // screen is left, and each arrival only refreshes the visible rows when
-    // the current selection actually reads from the caches.
-    async preloadRemainingCategories(token) {
-      for (const category of this.categories || []) {
-        if (token !== this.loadToken || Router.getCurrent() !== "live") {
-          return;
-        }
-        // Hidden screen: the background release owns the pending work now —
-        // stop queueing more portal calls.
-        if (this._releasedForBackground) {
-          return;
-        }
-        const columnId = category?.columnId;
-        if (columnId == null || this.channelsByColumn.has(String(columnId))) {
-          continue;
-        }
-        const result = await liveRepository.listChannels({ columnId });
-        if (token !== this.loadToken || Router.getCurrent() !== "live") {
-          return;
-        }
-        if (this._releasedForBackground) {
-          // Went dark mid-flight: do not rebuild state into a released screen.
-          return;
-        }
-        if (result.status === "success" && !this.channelsByColumn.has(String(columnId))) {
-          this.channelsByColumn.set(String(columnId), result.data);
-          if (this.listDependsOnAllCaches() || this.categorySelectionDependsOnCaches()) {
-            // A category selection refines quietly (a channel may leave its
-            // old category once); search/favourites grow with the caches.
-            this.refreshVisibleChannels();
-          } else {
-            // Only the rail counts changed ("…" -> numbers).
-            this.updateRowsOnly?.();
-          }
-        }
-      }
     },
 
     // Favourites -------------------------------------------------------------
@@ -414,13 +394,18 @@ export function createLiveScreenMethods01() {
     },
 
     // Row count the given rail id will show, read from the per-category
-    // caches and the recents/favourites snapshots only (no network). Used to
-    // clamp a restored row index before the selection paints the list.
+    // caches, the generated catalog index and the recents/favourites
+    // snapshots only (no network). Used to clamp a restored row index before
+    // the selection paints the list.
     visibleCountForRailId(railId) {
       const id = String(railId ?? "");
       if (id.startsWith("cat:")) {
-        const cached = this.channelsByColumn?.get?.(id.slice(4));
-        return Array.isArray(cached) ? cached.length : 0;
+        const columnId = id.slice(4);
+        const cached = this.channelsByColumn?.get?.(columnId);
+        if (Array.isArray(cached)) return cached.length;
+        // Not loaded yet: the index's deduped count is the real count.
+        const counted = this.catalogCounts?.get?.(columnId);
+        return Number.isFinite(counted) ? counted : 0;
       }
       if (id === internals.RAIL_FAVORITES_ID) return Array.isArray(this.favoriteIds) ? this.favoriteIds.length : 0;
       if (id === internals.RAIL_RECENTS_ID) return Array.isArray(this.recentChannels) ? this.recentChannels.length : 0;
@@ -447,7 +432,7 @@ export function createLiveScreenMethods01() {
       this.rowIndex = Math.max(0, Math.trunc(Number(restore.rowIndex) || 0));
       this.railSelection = item.railId;
       if (item.type === "category") {
-        void this.loadChannelsForCategory(item.columnId, { background: false });
+        void this.loadChannelsForCategory(item.columnId);
       } else {
         // favorites / recents: pure cache recompute, no network.
         this.refreshVisibleChannels();
@@ -494,10 +479,6 @@ export function createLiveScreenMethods01() {
       for (const columnId of plan.drop) {
         this.channelsByColumn.delete(columnId);
       }
-      // The ownership memo's signature is the cache key list: force a
-      // recompute from the kept caches.
-      this._ownershipSignature = null;
-      this._categoryOwnership = null;
       return plan;
     },
 
@@ -537,9 +518,9 @@ export function createLiveScreenMethods01() {
     },
 
     // visibilitychange -> visible: restore. Repaints the current selection
-    // from the network exactly when its cache was dropped, re-applies the
-    // retained rail selection / row focus / scroll position and re-arms the
-    // preload for everything that was dropped.
+    // from the network exactly when its cache was dropped and re-applies the
+    // retained rail selection / row focus / scroll position. There is no
+    // preload to re-arm: every category loads on demand when selected.
     restoreFromBackground() {
       if (!this._liveMounted || currentRouteSafe(Router) !== "live") return;
       if (!this._releasedForBackground) return; // nothing was released
@@ -570,21 +551,12 @@ export function createLiveScreenMethods01() {
         droppedColumnIds
       });
       if (plan.selectionWasDropped && plan.selectedColumnId) {
-        // Refetch the selection first; the repaint (and with it the focus and
-        // scroll restore) happens when the list lands. Only then is the
-        // preload re-armed, so an early cache arrival can never bounce the
-        // retained row focus off the still-empty list.
-        void this.loadChannelsForCategory(plan.selectedColumnId, { background: false }).then(() => {
-          if (plan.rearmPreload && this._liveMounted && !this._releasedForBackground) {
-            void this.preloadRemainingCategories(this.loadToken);
-          }
-        });
+        // Refetch the selection; the repaint (and with it the focus and
+        // scroll restore) happens when the list lands.
+        void this.loadChannelsForCategory(plan.selectedColumnId);
       } else {
         this.refreshVisibleChannels();
         this.applyFocusState?.();
-        if (plan.rearmPreload) {
-          void this.preloadRemainingCategories(this.loadToken);
-        }
       }
     },
 

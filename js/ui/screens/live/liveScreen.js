@@ -46,8 +46,10 @@ export {
   channelMatchesQuery,
   GENERIC_CATEGORY_NAME,
   isGenericCategoryName,
-  computeCategoryOwnership,
-  filterChannelsByOwnership,
+  isUsableCatalogIndex,
+  catalogCountsFromIndex,
+  leftoverChannelsFromIndex,
+  findGenericCategory,
   buildKeyboardLayout,
   keyboardFlatKeys,
   keyboardMove,
@@ -80,6 +82,25 @@ export {
 
 function isBackEvent(event) {
   return Environment.isBackEvent(event);
+}
+
+// The generated Magis catalog index (rail counts + the generic catalogue's
+// leftovers), computed OFFLINE by `npm run catalog:index` and shipped as a
+// static JSON next to the Magis client modules. Dynamic import with a
+// graceful fallback: an absent or unreadable file resolves to null and the
+// screen degrades (counts "…", generic catalogue fetched on demand) — it
+// never crashes and never blocks the module load. One promise per session:
+// the index is static, it is never re-fetched.
+let catalogIndexPromise = null;
+export function loadCatalogIndex() {
+  if (!catalogIndexPromise) {
+    catalogIndexPromise = import("../../../core/magis/catalog-index.json", {
+      with: { type: "json" }
+    })
+      .then((mod) => (mod && mod.default) || null)
+      .catch(() => null);
+  }
+  return catalogIndexPromise;
 }
 
 function escapeHtml(value) {

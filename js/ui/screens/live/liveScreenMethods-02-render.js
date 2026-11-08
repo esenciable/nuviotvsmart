@@ -10,9 +10,10 @@ import * as internals from "./liveScreen.js";
 // Vistos recientemente (only when non-empty), then ONE collapsible section
 // per SOURCE (MAGIS / PREMIUMTV) with the source's own count and its
 // indented category rows (name left, count right).
-// Category counts come from the per-category channel lists the screen already
-// loads — never from extra portal calls; a pending list renders "…" and its
-// source's count stays "…" until every one of its categories is cached.
+// Category counts come from the GENERATED catalog index the app ships with
+// (js/core/magis/catalog-index.json, `npm run catalog:index`) — no portal
+// call; a count missing from the index renders "…" and its source's count
+// stays "…" (no fake sums).
 // There is NO aggregate "all channels" row: nothing here may load or
 // merge every category on demand.
 //
@@ -283,72 +284,100 @@ export function queryLineView(query) {
   };
 }
 
-// Category dedupe ----------------------------------------------------------
+// Generated catalog index --------------------------------------------
 // The Magis portal exposes one GENERIC catalogue category ("ChannelList"):
 // that is the portal's full channel LISTING page, not a genre. Every other
-// category is SPECIFIC (Deportes, Vivo gratis, Cine y Series, a country...).
-// The categories overlap heavily (each specific category is 48-65% inside the
-// catalogue), so pressing through the rail used to show the same channel more
-// than once.
+// category is SPECIFIC (Deportes, Vivo gratis, Cine y Series, a country...)
+// and they overlap heavily.
 //
-// Owner-approved rule: each channel lives in exactly ONE category. A SPECIFIC
-// category beats the generic catalogue, and among specific categories the
-// FIRST one in catalog order that contains the channel owns it; the generic
-// catalogue then shows ONLY the channels no specific category owns, so the
-// union of all categories equals the full channel set with no duplicates.
-// Ownership is derived ONLY from the per-category caches the background
-// preload already fills (never an extra portal call): an uncached category
-// contributes nothing, so lists show as-is and refine as ownership arrives.
+// Owner-approved rule: each channel lives in exactly ONE category. That rule
+// is computed OFFLINE by `npm run catalog:index`
+// (scripts/magis-catalog-index.mjs) and shipped as
+// js/core/magis/catalog-index.json: { generatedAt, genericCategoryName,
+// categories: [{ columnId, name, count }], leftovers: [{ code, name,
+// number }] } — counts AFTER dedupe, plus the generic catalogue's leftovers.
+// The screen only READS the index: no runtime ownership computation and no
+// background walk of all categories. An absent/stale index degrades: counts
+// render "…", the generic catalogue falls back to its portal fetch, and
+// tune-in surfaces the real portal error. Never crashes.
 export const GENERIC_CATEGORY_NAME = "ChannelList";
 
-// Case-insensitive identification of the catalogue page category.
-export function isGenericCategoryName(name) {
+// Case-insensitive identification of the catalogue page category. The index
+// carries the generic name it was generated with; the constant is the
+// fallback when an index entry omits it.
+export function isGenericCategoryName(name, genericName = GENERIC_CATEGORY_NAME) {
   return (
     String(name ?? "")
       .trim()
-      .toLowerCase() === GENERIC_CATEGORY_NAME.toLowerCase()
+      .toLowerCase() ===
+    String(genericName ?? GENERIC_CATEGORY_NAME)
+      .trim()
+      .toLowerCase()
   );
 }
 
-// Pure: a Map of channelId -> owning category columnId, walking the categories
-// in catalog order and reading ONLY the cached per-category lists. A specific
-// category overwrites a generic-only claim and wins over every LATER specific
-// one; the catalogue keeps only channels no specific category claims.
-export function computeCategoryOwnership({ categories = [], channelsByColumn = new Map() } = {}) {
-  const caches = channelsByColumn instanceof Map ? channelsByColumn : new Map();
-  const owners = new Map();
-  const specificOwned = new Set();
-  for (const category of Array.isArray(categories) ? categories : []) {
-    const columnId = String(category?.columnId ?? "").trim();
-    if (!columnId) continue;
-    const list = caches.get(columnId);
-    if (!Array.isArray(list)) continue; // not walked yet: contributes nothing
-    const generic = isGenericCategoryName(category?.name);
-    for (const channel of list) {
-      const id = String(channel?.id ?? "").trim();
-      if (!id) continue;
-      if (generic) {
-        if (!owners.has(id)) owners.set(id, columnId);
-      } else if (!specificOwned.has(id)) {
-        // Specific beats the generic catalogue and beats a later specific one.
-        owners.set(id, columnId);
-        specificOwned.add(id);
-      }
-    }
-  }
-  return owners;
+// Pure: the index is usable only when it was actually generated (a non-empty
+// generatedAt — the shipped placeholder has `null` — plus a categories list).
+// Anything else degrades to the on-demand paths.
+export function isUsableCatalogIndex(index) {
+  return Boolean(
+    index &&
+    typeof index === "object" &&
+    String(index.generatedAt ?? "").trim() !== "" &&
+    Array.isArray(index.categories) &&
+    String(index.genericCategoryName ?? "").trim() !== ""
+  );
 }
 
-// Pure: the category's visible list — its channels minus the ones another
-// category owns. A channel with no owner entry (only possible while the map
-// is still refining) stays, so lists never lose rows they must not lose.
-export function filterChannelsByOwnership(channels, columnId, ownership) {
-  const owners = ownership instanceof Map ? ownership : new Map();
-  const id = String(columnId ?? "");
-  return (Array.isArray(channels) ? channels : []).filter((channel) => {
-    const owner = owners.get(String(channel?.id ?? "").trim());
-    return owner == null || owner === id;
-  });
+// Pure: Map columnId (as string) -> rail count (AFTER dedupe, from the
+// index). An unusable index or a malformed entry contributes nothing, so the
+// rail renders "…" instead of a fake 0.
+export function catalogCountsFromIndex(index) {
+  const counts = new Map();
+  if (!isUsableCatalogIndex(index)) return counts;
+  for (const entry of index.categories) {
+    const columnId = String(entry?.columnId ?? "").trim();
+    if (!columnId) continue;
+    counts.set(columnId, Math.max(0, Math.trunc(Number(entry?.count) || 0)));
+  }
+  return counts;
+}
+
+// Pure: the generic catalogue's channel rows, built from the index's
+// leftovers — the 500-channel portal page is NEVER fetched at runtime. An
+// unusable index yields no rows (the caller falls back to the portal fetch).
+// No `logo` field: nothing on this screen reads one.
+export function leftoverChannelsFromIndex(index) {
+  if (!isUsableCatalogIndex(index)) return [];
+  const list = Array.isArray(index.leftovers) ? index.leftovers : [];
+  const seen = new Set();
+  const channels = [];
+  for (const entry of list) {
+    const code = String(entry?.code ?? "").trim();
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    channels.push({
+      id: `magis:live:${code}`,
+      code,
+      name: String(entry?.name ?? "").trim() || "Canal en vivo",
+      number: entry?.number ?? null,
+      epgChannelId: null,
+      tvgId: null,
+      group: null,
+      groupName: String(index.genericCategoryName ?? GENERIC_CATEGORY_NAME)
+    });
+  }
+  return channels;
+}
+
+// Pure: the generic catalogue category of the CURRENT portal categories,
+// matched against the index's genericCategoryName (case-insensitive). Called
+// only with a usable index; null means "stay on the on-demand fetch path".
+export function findGenericCategory(categories, genericName = GENERIC_CATEGORY_NAME) {
+  for (const category of Array.isArray(categories) ? categories : []) {
+    if (isGenericCategoryName(category?.name, genericName)) return category;
+  }
+  return null;
 }
 
 // Rail model ---------------------------------------------------------------
@@ -480,23 +509,21 @@ export function resolveLiveSelectionRestore(items, remembered, channelCount = 0)
 
 // The flat focus order of the LEFT RAIL for the current state:
 //   [search] [favorites] [recents?] [source header, its categories]...
-// Counts are read from the per-category caches ONLY (no extra portal calls):
-// a category with no cached list yet is `loading: true` with count `null`,
-// and its source's count stays `null` ("…") until every one of its
-// categories is cached.
+// Magis counts come from the GENERATED catalog index (already deduped, no
+// portal call): a category missing from the index renders `…` (count null).
+// PremiumTV groups are not in the index (they do not overlap the Magis
+// catalog): their count is the cached list length, or `…` while it loads on
+// demand. A source's count stays `…` until every one of its categories has a
+// count — no fake sums.
 export function buildRailItems({
   categories = [],
   channelsByColumn = new Map(),
-  channelOwnership = null,
+  catalogCounts = new Map(),
   favoriteCount = 0,
   recentCount = 0
 } = {}) {
   const caches = channelsByColumn instanceof Map ? channelsByColumn : new Map();
-  // Per-category counts reflect the DEDUPLICATED lists (the owner-approved
-  // rule): a cached category counts the channels it owns, the catalogue counts
-  // only its leftovers. An uncached category stays `…` (count null). The map
-  // is derived from the caches the preload already fills — no extra calls.
-  const ownership = channelOwnership instanceof Map ? channelOwnership : computeCategoryOwnership({ categories, channelsByColumn: caches });
+  const indexCounts = catalogCounts instanceof Map ? catalogCounts : new Map();
   const items = [
     { type: "search", railId: RAIL_SEARCH_ID, label: "Buscar", count: null },
     { type: "favorites", railId: RAIL_FAVORITES_ID, label: "Favoritos", count: Math.max(0, Number(favoriteCount) || 0) }
@@ -524,13 +551,17 @@ export function buildRailItems({
     }
     const cached = caches.get(columnId);
     const channels = Array.isArray(cached) ? cached : [];
+    const premium = sourceNameFromColumnId(columnId) === "PremiumTV";
+    // Magis: the count is the index's deduped count ("…" while missing).
+    // PremiumTV: the on-demand cache length ("…" while not loaded).
+    const count = premium ? (cached ? channels.length : null) : indexCounts.has(columnId) ? indexCounts.get(columnId) : null;
     section.categories.push({
       type: "category",
       railId: categoryRailId(columnId),
       columnId,
       label: String(category?.name ?? "").trim() || "Sin nombre",
-      count: cached ? filterChannelsByOwnership(channels, columnId, ownership).length : null,
-      loading: !cached
+      count,
+      loading: count == null
     });
   }
   for (const section of sources) {
@@ -1120,31 +1151,18 @@ export function createLiveScreenMethods02() {
     },
 
     // The flat rail items for the CURRENT state (pure model above).
+    // The flat rail model for the CURRENT state. Rail counts come from the
+    // generated catalog index (this.catalogCounts) — no portal call.
     railItems() {
       return buildRailItems({
         categories: this.categories,
         channelsByColumn: this.channelsByColumn,
-        channelOwnership: this.categoryOwnership(),
+        catalogCounts: this.catalogCounts instanceof Map ? this.catalogCounts : new Map(),
         favoriteCount: this.favoriteSet?.size
           ? this.unionCachedChannels().filter((channel) => this.favoriteSet.has(String(channel?.id))).length
           : 0,
         recentCount: Array.isArray(this.recentChannels) ? this.recentChannels.length : 0
       });
-    },
-
-    // Memoized ownership map (pure computeCategoryOwnership over the current
-    // per-category caches). Caches are only ever ADDED (never replaced), so
-    // the cache-key signature is a valid invalidation key: the map is
-    // recomputed exactly when a new category cache arrives from the preload,
-    // keeping railItems() (called on every focus normalization) cheap.
-    categoryOwnership() {
-      const caches = this.channelsByColumn instanceof Map ? this.channelsByColumn : new Map();
-      const signature = Array.from(caches.keys()).join("\u0000");
-      if (this._ownershipSignature !== signature || !(this._categoryOwnership instanceof Map)) {
-        this._categoryOwnership = computeCategoryOwnership({ categories: this.categories, channelsByColumn: caches });
-        this._ownershipSignature = signature;
-      }
-      return this._categoryOwnership;
     },
 
     // Writes a rail focus index and remembers WHICH item (by railId) the index

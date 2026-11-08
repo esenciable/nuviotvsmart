@@ -387,26 +387,26 @@ describe("source contract: the DOM renders exactly one row per model item", () =
     // treats the removed id as no memory (pinned above), and the mount's
     // no-memory branch selects the first category through the normal path.
     const defaultStart = mountSource.indexOf("no memory");
-    const defaultEnd = mountSource.indexOf("preloadRemainingCategories", defaultStart);
+    const defaultEnd = mountSource.indexOf("// Applies the generated", defaultStart);
+    assert.ok(defaultEnd > defaultStart, "the mount body ends at applyCatalogIndex");
     const defaultBranch = mountSource.slice(defaultStart, defaultEnd);
     assert.match(defaultBranch, /item\.type === "category"/);
     assert.doesNotMatch(defaultBranch, /all/i);
   });
 
-  test("the background warm-up stays sequential and abortable, and never loads on demand", () => {
-    // The warm-up keeps the per-category counts filled: ONE category at a
-    // time, guarded by the load token so leaving the screen stops it. Select
-    // paths consume caches only.
-    const preloadStart = mountSource.indexOf("preloadRemainingCategories(token)");
-    assert.ok(preloadStart >= 0, "the background preload is wired from mount");
-    const preloadEnd = mountSource.indexOf("// Favourites", preloadStart);
-    const preload = mountSource.slice(preloadStart, preloadEnd);
-    assert.match(preload, /for \(const category of this\.categories \|\| \[\]\)/, "sequential: one category per await");
-    assert.match(preload, /token !== this\.loadToken/, "abortable: the mount token stops the loop");
+  test("rail counts and the generic leftovers come from the generated index: NO background walk", () => {
+    // The Magis catalog index is computed OFFLINE (`npm run catalog:index`)
+    // and shipped as js/core/magis/catalog-index.json. The screen reads it on
+    // mount for the rail counts and the ChannelList leftovers, and there is
+    // no background preload of every category anymore: categories load on
+    // demand, one fetch each.
+    assert.doesNotMatch(mountSource, /preloadRemainingCategories/, "the background preload is gone");
+    assert.match(mountSource, /loadCatalogIndex\(\)/, "mount reads the generated index");
+    assert.match(mountSource, /applyCatalogIndex\(/, "the index feeds the rail counts and the generic column");
     // Selecting any rail row must not iterate all categories to build a list.
     const selectStart = mountSource.indexOf("selectRailItem(railId", 0);
-    const preloadDef = mountSource.indexOf("async preloadRemainingCategories", selectStart);
-    const selectPath = mountSource.slice(selectStart, preloadDef);
+    assert.ok(selectStart >= 0, "selectRailItem exists");
+    const selectPath = mountSource.slice(selectStart); // through the end of the mount module
     assert.ok(selectPath.includes("loadChannelsForCategory"), "category rows load their own list");
     assert.doesNotMatch(selectPath, /for \(const .* of this\.categories/, "no iteration of all categories on selection");
   });

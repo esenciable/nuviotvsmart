@@ -236,10 +236,16 @@ describe("buildRailItems (left column: search, favorites, recents, source sectio
     ["premiumtv:El Salvador – TCS", [{ id: "premiumtv:x" }, { id: "premiumtv:y" }]]
   ]);
 
+  const catalogCounts = new Map([
+    ["42", 3],
+    ["43", 1]
+  ]);
+
   test("search first, then Favoritos (always), then Vistos recientemente only when non-empty — and NO aggregate row", () => {
     const withRecents = buildRailItems({
       categories,
       channelsByColumn: caches,
+      catalogCounts,
       favoriteCount: 2,
       recentCount: 3
     });
@@ -251,6 +257,7 @@ describe("buildRailItems (left column: search, favorites, recents, source sectio
     const withoutRecents = buildRailItems({
       categories,
       channelsByColumn: caches,
+      catalogCounts,
       favoriteCount: 0,
       recentCount: 0
     });
@@ -258,51 +265,65 @@ describe("buildRailItems (left column: search, favorites, recents, source sectio
   });
 
   test("the removed 'Todos los canales' aggregate row exists nowhere, even with warm caches", () => {
-    const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
+    const items = buildRailItems({ categories, channelsByColumn: caches, catalogCounts, favoriteCount: 0, recentCount: 0 });
     assert.equal(items.some((item) => item.railId === "__all__"), false);
     assert.equal(items.some((item) => item.type === "all"), false);
   });
 
   test("one section per SOURCE (not per category), in first-appearance order", () => {
-    const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
+    const items = buildRailItems({ categories, channelsByColumn: caches, catalogCounts, favoriteCount: 0, recentCount: 0 });
     const sources = items.filter((item) => item.type === "source");
     assert.deepEqual(sources.map((s) => s.label), ["Magis", "PremiumTV"]);
   });
 
-  test("a source's count is the sum of its cached categories; '…' while any is pending", () => {
-    const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
+  test("a Magis source's count comes from the generated index (no portal call); PremiumTV counts from its cache or stays '…'", () => {
+    // Magis counts are deduped OFFLINE by `npm run catalog:index` and shipped;
+    // they are known before any channel list is loaded.
+    const emptyCaches = buildRailItems({ categories, channelsByColumn: new Map(), catalogCounts, favoriteCount: 0, recentCount: 0 });
+    const magisFromIndex = emptyCaches.find((item) => item.railId === "source:Magis");
+    assert.equal(magisFromIndex.count, 4); // 3 + 1, straight from the index
+    const premiumFromIndex = emptyCaches.find((item) => item.railId === "source:PremiumTV");
+    assert.equal(premiumFromIndex.count, null); // PremiumTV keeps the on-demand cache count
+
+    const items = buildRailItems({ categories, channelsByColumn: caches, catalogCounts, favoriteCount: 0, recentCount: 0 });
     const magis = items.find((item) => item.railId === "source:Magis");
     const premium = items.find((item) => item.railId === "source:PremiumTV");
-    assert.equal(magis.count, 4); // both Magis categories cached
+    assert.equal(magis.count, 4);
     assert.equal(premium.count, 2);
     assert.equal(magis.expanded, true);
-
-    const pending = buildRailItems({
-      categories,
-      channelsByColumn: new Map([["42", [{ id: "a" }]]]),
-      favoriteCount: 0,
-      recentCount: 0
-    });
-    const magisPending = pending.find((item) => item.railId === "source:Magis");
-    assert.equal(magisPending.count, null); // renders as "…"
   });
 
-  test("category rows live under their source section with plain names and counts", () => {
-    const items = buildRailItems({ categories, channelsByColumn: caches, favoriteCount: 0, recentCount: 0 });
+  test("category rows live under their source section with plain names and index counts", () => {
+    const items = buildRailItems({ categories, channelsByColumn: caches, catalogCounts, favoriteCount: 0, recentCount: 0 });
     const magis = items.find((item) => item.railId === "source:Magis");
     const premium = items.find((item) => item.railId === "source:PremiumTV");
     assert.deepEqual(
-      magis.categories.map((c) => [c.label, c.count, c.loading]),
-      [["Deportes", 3, false], ["Noticias", 1, false]]
+      magis.categories.map((c) => [c.label, c.count]),
+      [["Deportes", 3], ["Noticias", 1]]
     );
     assert.deepEqual(premium.categories.map((c) => [c.label, c.count]), [["El Salvador – TCS", 2]]);
     assert.equal(magis.categories[0].railId, categoryRailId(42));
+  });
+
+  test("a Magis count missing from the index renders '…', never a fake 0", () => {
+    const items = buildRailItems({
+      categories,
+      channelsByColumn: caches,
+      catalogCounts: new Map([["42", 3]]),
+      favoriteCount: 0,
+      recentCount: 0
+    });
+    const magis = items.find((item) => item.railId === "source:Magis");
+    assert.equal(magis.categories.find((c) => c.label === "Deportes").count, 3);
+    assert.equal(magis.categories.find((c) => c.label === "Noticias").count, null);
+    assert.equal(magis.count, null); // no fake sums while a count is missing
   });
 
   test("malformed categories are skipped, not thrown on", () => {
     const items = buildRailItems({
       categories: [null, { columnId: "", name: "x" }, { columnId: "premiumtv:ok", name: "Ok" }],
       channelsByColumn: new Map(),
+      catalogCounts: new Map(),
       favoriteCount: 0,
       recentCount: 0
     });
@@ -487,21 +508,24 @@ describe("Android TV reference layout (source contract)", () => {
     assert.match(tuneSource, /catch \(error\)/);
   });
 
-  test("the mount module keeps the background preload that feeds per-category counts", () => {
-    assert.match(mountSource, /preloadRemainingCategories/);
+  test("the mount reads the generated catalog index: no background preload remains", () => {
+    // Counts come from js/core/magis/catalog-index.json (`npm run
+    // catalog:index`); the screen never walks the portal to fill them.
+    assert.match(mountSource, /loadCatalogIndex\(\)/);
+    assert.match(mountSource, /applyCatalogIndex\(/);
+    assert.doesNotMatch(mountSource, /preloadRemainingCategories/);
   });
 
-  test("the category list renderer applies dedupe, and the background preload refines the visible list without extra portal calls", () => {
-    // The category branch of refreshVisibleChannels must filter through the
-    // ownership map; search/favourites keep the full set (pinned in
-    // tests/test-live-category-dedupe.mjs).
+  test("the category list renders the loaded cache as-is; ownership is computed OFFLINE, never at runtime", () => {
+    // The category branch of refreshVisibleChannels renders exactly the
+    // cached (already-deduped-by-the-index) list; search/favourites keep the
+    // loaded set (pinned in tests/test-live-category-dedupe.mjs).
     const start = mountSource.indexOf("refreshVisibleChannels()");
     const end = mountSource.indexOf("selectRailItem(", start);
     const body = mountSource.slice(start, end);
-    assert.match(body, /filterChannelsByOwnership/);
-    // The preload hands its cache to the same recompute (no separate portal
-    // call path for ownership) instead of only refreshing search/favourites.
-    assert.match(mountSource, /categorySelectionDependsOnCaches/);
+    assert.match(body, /caches\.get\(columnId\)/);
+    assert.doesNotMatch(body, /filterChannelsByOwnership/);
+    assert.doesNotMatch(renderSource + mountSource, /computeCategoryOwnership|filterChannelsByOwnership/);
   });
 });
 
