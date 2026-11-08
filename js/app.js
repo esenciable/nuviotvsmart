@@ -514,6 +514,44 @@ function setupTizenPlaybackLifecycle() {
   });
 }
 
+function probeBootTiming() {
+  // Cold-start measurement: the only number that can justify more optimization.
+  // Reported once, with the engine's own first-contentful-paint when it exposes it.
+  try {
+    const report = () =>
+      import("./core/diagnostics/runtimeBeacon.js")
+        .then((mod) =>
+          mod.sendRuntimeBeacon({
+            phase: "boot",
+            fcpMs: Math.round(globalThis.__NUVIO_FCP_MS__ || 0) || null,
+            nowMs: Math.round(globalThis.performance?.now?.() || 0)
+          })
+        )
+        .catch(() => {});
+    if (typeof globalThis.PerformanceObserver === "function") {
+      try {
+        const observer = new globalThis.PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            if (entry.name === "first-contentful-paint") {
+              globalThis.__NUVIO_FCP_MS__ = entry.startTime;
+            }
+          }
+        });
+        observer.observe({ type: "paint", buffered: true });
+      } catch (_) {
+        // Engine without paint entries.
+      }
+    }
+    if (typeof globalThis.requestAnimationFrame === "function") {
+      globalThis.requestAnimationFrame(() => globalThis.requestAnimationFrame(report));
+    } else {
+      report();
+    }
+  } catch (_) {
+    // Diagnostics only.
+  }
+}
+
 function probeMemoryBudget() {
   // A Samsung TV kills apps that exceed its memory budget, and this panel exposes
   // no other way to read it. Reports the hints the web engine offers so the budget
@@ -726,6 +764,7 @@ async function bootstrapApp() {
   probeCrossOriginRead();
   probePlayerCapabilities();
   probeMemoryBudget();
+  probeBootTiming();
   applyPerformanceMode();
   markBootStage("Loading language resources");
   await I18n.init();

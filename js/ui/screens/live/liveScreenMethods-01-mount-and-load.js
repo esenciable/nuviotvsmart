@@ -130,6 +130,18 @@ export function createLiveScreenMethods01() {
       if (categories.status !== "success") {
         this.categoriesError = String(categories.detail || "");
         this.render();
+        if (!this.paintReported) {
+          this.paintReported = true;
+          void import("../../../core/diagnostics/runtimeBeacon.js")
+            .then((mod) =>
+              mod.sendRuntimeBeacon({
+                phase: "live-paint",
+                ms: Math.round(globalThis.performance?.now?.() || 0),
+                rows: Array.isArray(this.channels) ? this.channels.length : 0
+              })
+            )
+            .catch(() => {});
+        }
         return;
       }
       this.categories = Array.isArray(categories.data) ? categories.data : [];
