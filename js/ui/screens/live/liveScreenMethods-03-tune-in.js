@@ -1,7 +1,14 @@
 /* eslint-disable no-unused-vars */
 import * as internals from "./liveScreen.js";
+import { clampIndex, shouldAcceptRepeatMove, expandedGroupIdsRef } from "./liveScreenMethods-02-render.js";
 
 const NOTICE_VISIBLE_MS = 6000;
+
+// Fluidity: a held remote key auto-repeats much faster than a 110ms scroll
+// animation can settle. Repeats faster than the cadence are coalesced so the
+// list advances at a steady pace instead of queuing.
+const MOVE_CADENCE_MS = 90;
+const SCROLL_ANIMATE_MS = 110;
 
 // Temporary focal telemetry: a TV gives no logs, and "navigation does not work"
 // can mean no movement, a double move from two handlers, or the wrong target.
@@ -16,122 +23,149 @@ function reportLiveNav(payload) {
   }
 }
 
+// Errors must never be silent on a TV (no logs): every guarded handler reports
+// through the runtime beacon with the message and a short stack head.
+function reportLiveErrorSafe(error, where) {
+  try {
+    const message = String(error?.message || error || "unknown error");
+    const stackHead = String(error?.stack || "")
+      .split("\n")
+      .slice(0, 4)
+      .join(" | ")
+      .slice(0, 300);
+    void import("../../../core/diagnostics/runtimeBeacon.js")
+      .then((mod) => mod.sendRuntimeBeacon({ phase: "live-error", where, message, stackHead }))
+      .catch(() => {});
+  } catch (_) {
+    // Diagnostics are optional.
+  }
+}
+
 function liveFocusSnapshot(container) {
   const focused = container?.querySelector(".focusable.focused");
-  const chips = container?.querySelector(".live-chips-row");
   const list = container?.querySelector(".live-channel-list");
   const size = (el) => (el ? `${Math.round(el.scrollHeight)}/${Math.round(el.clientHeight)}` : "x");
   return {
-    focus: focused ? `${focused.dataset.action || "?"}:${focused.dataset.focusKey || focused.dataset.chipId || "?"}` : "none",
-    chips: chips ? Math.round(chips.scrollLeft) : -1,
+    focus: focused ? `${focused.dataset.action || "?"}:${focused.dataset.flatIndex || focused.dataset.focusKey || "?"}` : "none",
     list: list ? Math.round(list.scrollTop) : -1,
-    chipsSize: size(chips),
     listSize: size(list)
   };
 }
 
 // Key handling, activation and tune-in. Focus is a deterministic state model
-// (focusZone + chipIndex + rowIndex + rowFocusTarget) instead of geometric
-// dpad navigation: LEFT/RIGHT cross between the chips row and the list only at
-// the row edge (and reach the row's star), UP/DOWN scroll the list and move
-// the preview live, Enter activates. Back exits search before leaving the
-// screen.
+// (focusZone + flatIndex + rowFocusTarget) over the FLAT list order (group
+// headers interleaved with their expanded rows) instead of geometric dpad
+// navigation: UP/DOWN move one flat item with class toggles only (no
+// re-render), RIGHT reaches the row's star, Enter activates (group toggle,
+// tune-in, favourite), LEFT backs out of the star. Back exits search before
+// leaving the screen.
 export function createLiveScreenMethods03() {
   const { Router, ScreenUtils, liveRepository, isBackEvent, escapeHtml, t } = internals;
 
   return {
     onKeyDown(event) {
-      const code = Number(event?.keyCode || 0);
-      if ((code >= 37 && code <= 40) || code === 13) {
-        reportLiveNav({ key: code, repeat: Boolean(event?.repeat), before: liveFocusSnapshot(this.container) });
-      }
-      if (isBackEvent(event)) {
-        event?.preventDefault?.();
-        if (this.searchActive) {
-          this.exitSearch();
-          reportLiveNav({ after: liveFocusSnapshot(this.container), search: "exit" });
+      try {
+        const code = Number(event?.keyCode || 0);
+        if ((code >= 37 && code <= 40) || code === 13) {
+          reportLiveNav({ key: code, repeat: Boolean(event?.repeat), before: liveFocusSnapshot(this.container) });
+        }
+        if (isBackEvent(event)) {
+          event?.preventDefault?.();
+          if (this.searchActive) {
+            this.exitSearch();
+            reportLiveNav({ after: liveFocusSnapshot(this.container), search: "exit" });
+            return;
+          }
+          Router.back();
           return;
         }
-        Router.back();
-        return;
-      }
-      if (this.searchActive) {
-        // The real <input> owns every key while search is open; Escape (27)
-        // leaves search. Nothing may move focus out from under the IME.
-        if (code === 27) {
-          this.exitSearch();
+        if (this.searchActive) {
+          // The real <input> owns every key while search is open; Escape (27)
+          // leaves search. Nothing may move focus out from under the IME.
+          if (code === 27) {
+            this.exitSearch();
+          }
+          return;
         }
-        return;
-      }
 
-      if (code === 37 || code === 39) {
-        this.handleHorizontal(code === 37 ? -1 : 1);
-      } else if (code === 38 || code === 40) {
-        this.handleVertical(code === 38 ? -1 : 1);
-      } else if (code === 13) {
-        this.handleEnter();
-      } else {
-        return;
+        if (code === 37 || code === 39) {
+          this.handleHorizontal(code === 37 ? -1 : 1);
+        } else if (code === 38 || code === 40) {
+          this.handleVertical(code === 38 ? -1 : 1);
+        } else if (code === 13) {
+          this.handleEnter();
+        } else {
+          return;
+        }
+        reportLiveNav({ key: code, after: liveFocusSnapshot(this.container) });
+      } catch (error) {
+        reportLiveErrorSafe(error, "onKeyDown");
       }
-      reportLiveNav({ key: code, after: liveFocusSnapshot(this.container) });
     },
 
     handleHorizontal(delta) {
       if (this.focusZone === "header") {
         // Only the search and guide pills live here.
-        this.headerIndex = Math.min(1, Math.max(0, (this.headerIndex || 0) + delta));
+        this.headerIndex = clampIndex((this.headerIndex || 0) + delta, 2);
         this.applyFocusState({ smooth: true });
         return;
       }
-      if (this.focusZone === "chips") {
-        const chips = this.chipModel();
-        this.chipIndex = Math.min(chips.length - 1, Math.max(0, (this.chipIndex || 0) + delta));
-        this.applyFocusState({ smooth: true });
+      // List zone: the only horizontal target is the row's star. Group header
+      // cards have no horizontal neighbour; the star backs out with LEFT.
+      const item = this.flatItems()[this.flatIndex || 0];
+      if (!item || item.type !== "channel") {
         return;
       }
-      // List zone: LEFT leaves the star back to the row, then leaves the list
-      // for the chips row (the list is one column wide, so LEFT is always the
-      // row edge). RIGHT enters the row's star and stops there.
-      if (delta < 0) {
-        if (this.rowFocusTarget === "star") {
-          this.rowFocusTarget = "row";
-          this.applyFocusState({ smooth: true });
-        } else {
-          this.focusZone = "chips";
+      if (delta > 0) {
+        if (this.rowFocusTarget !== "star") {
+          this.rowFocusTarget = "star";
           this.applyFocusState({ smooth: true });
         }
-      } else if (this.rowFocusTarget === "row") {
-        this.rowFocusTarget = "star";
+      } else if (this.rowFocusTarget === "star") {
+        this.rowFocusTarget = "row";
         this.applyFocusState({ smooth: true });
       }
     },
 
     handleVertical(delta) {
       if (this.focusZone === "header") {
-        this.focusZone = "chips";
-        this.applyFocusState({ smooth: true });
-        return;
-      }
-      if (this.focusZone === "chips") {
+        // DOWN enters the flat list (at its remembered/clamped position); UP
+        // from the header has nowhere to go and stays.
         if (delta > 0) {
           this.focusZone = "list";
           this.rowFocusTarget = "row";
           this.applyFocusState({ smooth: true });
-        } else {
-          this.focusZone = "header";
-          this.headerIndex = 0;
-          this.applyFocusState({ smooth: true });
         }
         return;
       }
-      // List zone: UP/DOWN move the focused row and the preview follows focus
-      // immediately (no Enter needed).
-      const count = Array.isArray(this.channels) ? this.channels.length : 0;
-      if (!count) return;
-      const next = Math.min(count - 1, Math.max(0, (this.rowIndex || 0) + delta));
-      if (next === this.rowIndex) return;
-      this.rowIndex = next;
-      this.updateRowsOnly();
+      // List zone: one flat item per keypress, class toggles only. At the top
+      // of the list UP returns to the header pills.
+      const items = this.flatItems();
+      if (!items.length) return;
+      if (delta < 0 && (this.flatIndex || 0) <= 0) {
+        this.focusZone = "header";
+        this.headerIndex = 0;
+        this.applyFocusState({ smooth: true });
+        return;
+      }
+      this.moveFlat(delta);
+    },
+
+    // One flat move: coalesce auto-repeats faster than the scroll animation,
+    // then reposition focus by toggling classes only (never a re-render).
+    moveFlat(delta) {
+      const items = this.flatItems();
+      if (!items.length) return;
+      const now = Date.now();
+      if (!shouldAcceptRepeatMove(this.lastFlatMoveAt, now, MOVE_CADENCE_MS)) {
+        return;
+      }
+      this.lastFlatMoveAt = now;
+      const next = clampIndex((this.flatIndex || 0) + delta, items.length);
+      if (next === this.flatIndex) return;
+      this.flatIndex = next;
+      this.rowFocusTarget = "row";
+      this.applyFocusState({ smooth: true });
     },
 
     handleEnter() {
@@ -143,61 +177,104 @@ export function createLiveScreenMethods03() {
         }
         return;
       }
-      if (this.focusZone === "chips") {
-        const chip = this.chipModel()[this.chipIndex || 0];
-        if (chip) this.selectChip(chip.id, this.chipIndex);
+      const item = this.flatItems()[this.flatIndex || 0];
+      if (!item) return;
+      if (item.type === "group") {
+        this.toggleGroup(item);
         return;
       }
-      const channels = Array.isArray(this.channels) ? this.channels : [];
-      const channel = channels[this.rowIndex || 0];
+      const channel = item.channel;
       if (!channel) return;
       if (this.rowFocusTarget === "star") {
         // Toggling a favourite must never tune in.
         this.toggleFavorite(channel.id);
         return;
       }
-      const node = this.container?.querySelector(`.live-channel-row[data-row-index="${this.rowIndex}"]`);
-      void this.tuneIn(node || { dataset: { channelId: String(channel.id || ""), channelTitle: channel.name || "" } });
+      const node = this.container?.querySelector(`[data-flat-index="${this.flatIndex}"]`);
+      this.tuneIn(node || { dataset: { channelId: String(channel.id || ""), channelTitle: channel.name || "" } }).catch?.((error) =>
+        reportLiveErrorSafe(error, "tuneIn")
+      );
     },
 
-    // Chips ------------------------------------------------------------------
-    selectChip(chipId, chipIndex = this.chipIndex) {
-      const id = String(chipId ?? "");
-      if (!id) return;
-      this.activeChipId = id;
-      this.focusZone = "chips";
-      if (Number.isInteger(chipIndex)) this.chipIndex = chipIndex;
-      this.rowIndex = 0;
-      this.rowFocusTarget = "row";
-      this.clearNotice();
-      if (id === FAVORITES_CHIP_ID) {
-        this.refreshVisibleChannels();
+    // Groups -----------------------------------------------------------------
+    // Enter on a group header toggles it. When the rows are already known the
+    // toggle is surgical (one insert/remove, no list re-render); otherwise the
+    // list repaints once and the channels load in the background.
+    toggleGroup(item) {
+      const groupId = String(item?.groupId ?? "");
+      if (!groupId) return;
+      const willExpand = !expandedGroupIdsRef().has(groupId);
+      if (willExpand) expandedGroupIdsRef().add(groupId);
+      else expandedGroupIdsRef().delete(groupId);
+      if (this.toggleGroupRowsInPlace(item, willExpand)) {
+        this.reindexFlatDom();
+        this.applyFocusState({ smooth: true });
         return;
       }
-      // "Todos" shows the first source group; other chips map 1:1 to a portal
-      // category. Cached lists render instantly, misses load in the foreground.
-      const columnId = id === internals.ALL_CHIP_ID ? (this.categories[0]?.columnId ?? null) : id;
-      this.selectedColumnId = columnId;
-      const cached = this.channelsByColumn.get(String(columnId));
-      if (cached) {
-        this.channels = cached;
-        this.channelsLoading = false;
-        this.channelsError = "";
-        this.refreshVisibleChannels();
-        return;
+      this.updateRowsOnly();
+      if (willExpand) this.ensureGroupChannels(groupId);
+    },
+
+    // Surgical toggle: insert/remove only the toggled group's rows. The
+    // header keeps its flat index (it precedes its own rows), so focus stays
+    // exactly where it is. Returns false when the cheap path is not possible.
+    toggleGroupRowsInPlace(item, willExpand) {
+      try {
+        const container = this.container;
+        const selector = groupAttributeSelector("data-group-id", item?.groupId);
+        const header = container?.querySelector(`.live-group-header${selector}`);
+        if (!header) return false;
+        if (!willExpand) {
+          container.querySelectorAll(`.live-group-rows${selector}`).forEach((node) => node.remove());
+          header.setAttribute("aria-expanded", "false");
+          header.querySelector(".live-group-chevron")?.classList.remove("is-expanded");
+          return true;
+        }
+        if (item.loading || !Array.isArray(item.channels) || !item.channels.length) {
+          return false; // rows unknown: full list repaint shows the loading state
+        }
+        const wrapper = document.createElement("div");
+        wrapper.className = "live-group-rows";
+        wrapper.dataset.groupId = String(item.groupId);
+        wrapper.innerHTML = item.channels.map((channel) => this.renderChannelRow(channel)).join("");
+        header.insertAdjacentElement("afterend", wrapper);
+        header.setAttribute("aria-expanded", "true");
+        header.querySelector(".live-group-chevron")?.classList.add("is-expanded");
+        return true;
+      } catch (error) {
+        reportLiveErrorSafe(error, "toggleGroupRowsInPlace");
+        return false;
       }
-      this.channels = [];
-      this.channelsLoading = true;
-      this.channelsError = "";
-      this.render();
-      void this.loadChannelsForCategory(columnId, { background: false });
+    },
+
+    // Loads a group's channels through the existing cache machinery and
+    // repaints the list exactly once when the cache arrives (the background
+    // load path itself does not repaint).
+    ensureGroupChannels(groupId) {
+      const key = String(groupId ?? "");
+      if (!key || key === internals.FAVORITES_CHIP_ID) return;
+      if (this.channelsByColumn?.has(key)) return;
+      void this.loadChannelsForCategory(key, { background: true });
+      const token = this.loadToken || 0;
+      const startedAt = Date.now();
+      const poll = () => {
+        this.groupPollTimer = 0;
+        if (token !== (this.loadToken || 0) || Router.getCurrent?.() !== "live") return;
+        if (this.channelsByColumn?.has(key)) {
+          this.updateRowsOnly();
+          return;
+        }
+        if (Date.now() - startedAt > 15000) return;
+        this.groupPollTimer = setTimeout(poll, 400);
+      };
+      this.groupPollTimer = setTimeout(poll, 400);
     },
 
     // Search -----------------------------------------------------------------
     openSearch() {
       this.searchActive = true;
       this.searchQuery = "";
-      this.rowIndex = 0;
+      this.flatIndex = 0;
       this.rowFocusTarget = "row";
       this.render();
       // Mounting the input and focusing it is what invites the TV system IME;
@@ -215,7 +292,7 @@ export function createLiveScreenMethods03() {
       field.dataset.liveBound = "1";
       field.addEventListener("input", () => {
         this.searchQuery = String(field.value || "");
-        this.rowIndex = 0;
+        this.flatIndex = 0;
         this.rowFocusTarget = "row";
         this.refreshVisibleChannels();
       });
@@ -232,7 +309,7 @@ export function createLiveScreenMethods03() {
     exitSearch() {
       this.searchActive = false;
       this.searchQuery = "";
-      this.rowIndex = 0;
+      this.flatIndex = 0;
       this.rowFocusTarget = "row";
       this.focusZone = "header";
       this.headerIndex = 0;
@@ -247,63 +324,72 @@ export function createLiveScreenMethods03() {
       this.showNotice(t("live_guide_unavailable", {}, "La guía de programas necesita datos EPG y todavía no está disponible"));
     },
 
-    // Keep the focused node inside its own scroll panel. The chips row scrolls
-    // horizontally, the channel list vertically; never the document, and by
-    // the smallest amount that makes the node fully visible.
+    // Keep the focused node inside the list panel by the smallest movement
+    // that makes it fully visible, animated over a short ease so held keys
+    // never lag behind the scroll.
     ensureFocusVisible({ smooth = true } = {}) {
-      const focused = this.container?.querySelector(".focusable.focused");
-      if (!focused) {
-        return;
-      }
-      const chipsRow = focused.closest(".live-chips-row");
-      if (chipsRow) {
-        const rowRect = chipsRow.getBoundingClientRect();
+      try {
+        const focused = this.container?.querySelector(".focusable.focused");
+        if (!focused) {
+          return;
+        }
+        const panel = focused.closest(".live-channel-list");
+        if (!panel) {
+          return;
+        }
+        const panelRect = panel.getBoundingClientRect();
         const rect = focused.getBoundingClientRect();
-        const margin = 24;
+        const margin = 16;
         let delta = 0;
-        if (rect.left < rowRect.left + margin) {
-          delta = rect.left - rowRect.left - margin;
-        } else if (rect.right > rowRect.right - margin) {
-          delta = rect.right - rowRect.right + margin;
+        if (rect.top < panelRect.top + margin) {
+          delta = rect.top - panelRect.top - margin;
+        } else if (rect.bottom > panelRect.bottom - margin) {
+          delta = rect.bottom - panelRect.bottom + margin;
         }
-        if (!delta) return;
-        const left = chipsRow.scrollLeft + delta;
-        if (typeof chipsRow.scrollTo === "function") {
-          chipsRow.scrollTo({ left, behavior: smooth ? "smooth" : "auto" });
+        if (!delta) {
+          return;
+        }
+        const maxTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+        const top = Math.min(maxTop, Math.max(0, panel.scrollTop + delta));
+        if (smooth) {
+          this.animateListScroll(panel, top);
         } else {
-          chipsRow.scrollLeft = left;
+          panel.scrollTop = top;
         }
-        return;
+      } catch (error) {
+        reportLiveErrorSafe(error, "ensureFocusVisible");
       }
-      const panel = focused.closest(".live-channel-list");
-      if (!panel) {
-        return;
+    },
+
+    // Short eased scroll (~110ms, ease-out cubic). A new target replaces the
+    // running animation instead of queueing behind it.
+    animateListScroll(panel, top) {
+      if (this.listScrollFrame && typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(this.listScrollFrame);
       }
-      const panelRect = panel.getBoundingClientRect();
-      const rect = focused.getBoundingClientRect();
-      const margin = 16;
-      let delta = 0;
-      if (rect.top < panelRect.top + margin) {
-        delta = rect.top - panelRect.top - margin;
-      } else if (rect.bottom > panelRect.bottom - margin) {
-        delta = rect.bottom - panelRect.bottom + margin;
-      }
-      if (!delta) {
-        return;
-      }
-      const top = panel.scrollTop + delta;
-      if (typeof panel.scrollTo === "function") {
-        panel.scrollTo({ top, behavior: smooth ? "smooth" : "auto" });
-      } else {
+      this.listScrollFrame = 0;
+      const from = panel.scrollTop;
+      const delta = top - from;
+      if (Math.abs(delta) < 1) return;
+      if (typeof requestAnimationFrame !== "function") {
         panel.scrollTop = top;
+        return;
       }
+      const start = globalThis.performance?.now ? performance.now() : Date.now();
+      const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+      const step = (now) => {
+        const t = Math.min(1, Math.max(0, (now - start) / SCROLL_ANIMATE_MS));
+        panel.scrollTop = from + delta * easeOutCubic(t);
+        this.listScrollFrame = t < 1 ? requestAnimationFrame(step) : 0;
+      };
+      this.listScrollFrame = requestAnimationFrame(step);
     },
 
     // Temporary probe: a TV gives no logs, so each channel logo reports whether
     // it actually decoded (naturalWidth) or errored. Decides between "the image
     // never arrives" and "the image arrives but is not visible".
     probeChannelLogos() {
-      const images = Array.from(this.container?.querySelectorAll(".live-row-logo img, .live-preview-logo") || []).slice(0, 12);
+      const images = Array.from(this.container?.querySelectorAll(".live-row-logo img") || []).slice(0, 12);
       if (!images.length) {
         // The first renders are the loading skeleton: nothing to measure yet.
         return;
@@ -423,6 +509,12 @@ export function createLiveScreenMethods03() {
       }
     }
   };
+}
+
+function groupAttributeSelector(attribute, value) {
+  const raw = String(value ?? "");
+  const escaped = globalThis.CSS?.escape ? CSS.escape(raw) : raw.replace(/(["\\])/g, "\\$1");
+  return `[${attribute}="${escaped}"]`;
 }
 
 function focusWithoutAutoScrollSafe(node) {

@@ -4,6 +4,7 @@
 // rendering methods; this file pins their exact observable behaviour.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   sourceNameFromChannelId,
@@ -16,7 +17,11 @@ import {
   FAVORITES_STORAGE_KEY,
   readFavoriteIds,
   writeFavoriteIds,
-  toggleFavoriteId
+  toggleFavoriteId,
+  buildGroupSections,
+  flattenSections,
+  clampIndex,
+  shouldAcceptRepeatMove
 } from "../js/ui/screens/live/liveScreenMethods-02-render.js";
 
 describe("sourceNameFromChannelId", () => {
@@ -155,6 +160,180 @@ describe("favourites", () => {
     const throwing = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); } };
     assert.deepEqual(readFavoriteIds(throwing), []);
     assert.doesNotThrow(() => writeFavoriteIds(["magis:live:a"], throwing));
+  });
+});
+
+describe("buildGroupSections (mobile-style collapsible groups)", () => {
+  const categories = [
+    { columnId: 42, name: "Deportes" },
+    { columnId: "premiumtv:El Salvador – TCS", name: "El Salvador – TCS" }
+  ];
+  const caches = new Map([["42", [{ id: "magis:live:a" }, { id: "magis:live:b" }]]]);
+
+  test("the favorites group sits first and only when it has channels", () => {
+    const withFavorites = buildGroupSections({
+      categories,
+      channelsByColumn: caches,
+      favoriteChannels: [{ id: "premiumtv:x" }],
+      favoritesLabel: "Favoritos"
+    });
+    assert.equal(withFavorites[0].groupId, "__favorites__");
+    assert.equal(withFavorites[0].label, "Favoritos");
+    assert.equal(withFavorites[0].count, 1);
+
+    const withoutFavorites = buildGroupSections({
+      categories,
+      channelsByColumn: caches,
+      favoriteChannels: [],
+      favoritesLabel: "Favoritos"
+    });
+    assert.equal(withoutFavorites.some((s) => s.groupId === "__favorites__"), false);
+  });
+
+  test("there is no Todos group: one section per category, source-prefixed", () => {
+    const sections = buildGroupSections({
+      categories,
+      channelsByColumn: caches,
+      favoriteChannels: [],
+      favoritesLabel: "Favoritos"
+    });
+    assert.equal(sections.some((s) => s.groupId === "__all__"), false);
+    assert.equal(sections[0].groupId, "42");
+    assert.equal(sections[0].label, "Magis · Deportes");
+    assert.equal(sections[0].count, 2);
+    assert.equal(sections[0].loading, false);
+    assert.equal(sections[1].groupId, "premiumtv:El Salvador – TCS");
+    assert.equal(sections[1].label, "PremiumTV · El Salvador – TCS");
+  });
+
+  test("a category whose channels are not cached yet is a loading group", () => {
+    const sections = buildGroupSections({
+      categories,
+      channelsByColumn: caches,
+      favoriteChannels: [],
+      favoritesLabel: "Favoritos"
+    });
+    assert.equal(sections[1].loading, true);
+    assert.equal(sections[1].count, null);
+    assert.deepEqual(sections[1].channels, []);
+  });
+
+  test("malformed categories are skipped, not thrown on", () => {
+    const sections = buildGroupSections({
+      categories: [null, { columnId: "", name: "x" }, { columnId: "premiumtv:ok", name: "Ok" }],
+      channelsByColumn: new Map(),
+      favoriteChannels: [],
+      favoritesLabel: "Favoritos"
+    });
+    assert.deepEqual(sections.map((s) => s.groupId), ["premiumtv:ok"]);
+  });
+});
+
+describe("flattenSections (flat focus order: header, then its rows)", () => {
+  const sections = [
+    { groupId: "g1", label: "A", count: 2, loading: false, channels: [{ id: "a" }, { id: "b" }] },
+    { groupId: "g2", label: "B", count: 1, loading: false, channels: [{ id: "c" }] }
+  ];
+
+  test("collapsed groups render only their header card", () => {
+    const items = flattenSections(sections, new Set());
+    assert.deepEqual(items.map((i) => [i.type, i.groupId]), [["group", "g1"], ["group", "g2"]]);
+  });
+
+  test("an expanded group renders its header followed by its own rows", () => {
+    const items = flattenSections(sections, new Set(["g1"]));
+    assert.deepEqual(items.map((i) => i.type), ["group", "channel", "channel", "group"]);
+    assert.equal(items[1].groupId, "g1");
+    assert.equal(items[1].channel.id, "a");
+    assert.equal(items[2].groupId, "g1");
+    assert.equal(items[3].groupId, "g2");
+  });
+
+  test("a missing expanded-set collapses everything instead of throwing", () => {
+    const items = flattenSections(sections, undefined);
+    assert.equal(items.length, 2);
+  });
+});
+
+describe("clampIndex (focus never lands outside the list)", () => {
+  test("clamps into the valid range", () => {
+    assert.equal(clampIndex(-5, 3), 0);
+    assert.equal(clampIndex(2, 3), 2);
+    assert.equal(clampIndex(9, 3), 2);
+  });
+
+  test("an empty list collapses to index 0", () => {
+    assert.equal(clampIndex(4, 0), 0);
+  });
+
+  test("garbage input collapses to index 0", () => {
+    assert.equal(clampIndex(undefined, 5), 0);
+    assert.equal(clampIndex(Number.NaN, 5), 0);
+    assert.equal(clampIndex(1.5, 5), 0);
+  });
+});
+
+describe("shouldAcceptRepeatMove (coalesce held-key repeats)", () => {
+  const cadence = 90;
+
+  test("the first move of a burst is always accepted", () => {
+    assert.equal(shouldAcceptRepeatMove(undefined, 1000, cadence), true);
+    assert.equal(shouldAcceptRepeatMove(0, 1000, cadence), true);
+  });
+
+  test("a repeat faster than the cadence is dropped", () => {
+    assert.equal(shouldAcceptRepeatMove(1000, 1000 + cadence - 1, cadence), false);
+  });
+
+  test("a repeat at or after the cadence advances the list again", () => {
+    assert.equal(shouldAcceptRepeatMove(1000, 1000 + cadence, cadence), true);
+  });
+});
+
+describe("mobile-style grouped layout (source contract)", () => {
+  const renderSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-02-render.js", import.meta.url),
+    "utf8"
+  );
+  const tuneSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-03-tune-in.js", import.meta.url),
+    "utf8"
+  );
+
+  test("one full-width list: no preview panel, no rail, no chips row", () => {
+    assert.match(renderSource, /\.live-channel-list\s*\{[^}]*flex:\s*1/);
+    assert.doesNotMatch(renderSource, /live-preview/);
+    assert.doesNotMatch(renderSource, /live-rail|live-chips-row/);
+    assert.doesNotMatch(renderSource, /width:\s*50%/);
+  });
+
+  test("groups are header cards with label, count and an expanded/collapsed chevron", () => {
+    assert.match(renderSource, /live-group-header/);
+    assert.match(renderSource, /live-group-chevron/);
+    assert.match(renderSource, /live-group-count/);
+    assert.match(renderSource, /aria-expanded=/);
+  });
+
+  test("channel rows are indented under their expanded group", () => {
+    assert.match(renderSource, /live-group-rows/);
+  });
+
+  test("focus movement toggles classes instead of re-rendering, and coalesces repeats", () => {
+    assert.match(tuneSource, /MOVE_CADENCE_MS/);
+    assert.match(tuneSource, /moveFlat/);
+    assert.match(renderSource, /transition:\s*background-color/);
+  });
+
+  test("short eased scroll, never a long smooth scroll", () => {
+    assert.match(tuneSource, /SCROLL_ANIMATE_MS/);
+    assert.doesNotMatch(tuneSource, /behavior:\s*"smooth"/);
+  });
+
+  test("errors are reported through the live-error beacon, never swallowed silently", () => {
+    assert.match(tuneSource, /phase:\s*"live-error"/);
+    assert.match(renderSource, /phase:\s*"live-error"/);
+    assert.match(renderSource, /catch \(error\)/);
+    assert.match(tuneSource, /catch \(error\)/);
   });
 });
 
