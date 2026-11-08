@@ -6,6 +6,9 @@ import { createMagisCrypto } from "./magisCrypto.js";
 import { createMagisPortal } from "./magisPortal.js";
 import { createMagisSession } from "./magisSession.js";
 import { createMagisVod } from "./magisVod.js";
+import { createMagisLive } from "./magisLive.js";
+
+export { MAGIS_LIVE_COLUMN_CODE, createMagisLive } from "./magisLive.js";
 
 export {
   MAGIS_CRYPTO_ACCEPTANCE_PLAINTEXT,
@@ -13,6 +16,12 @@ export {
   createMagisCrypto
 } from "./magisCrypto.js";
 export { MAGIS_SN_SALT, createDeviceDict, createDeviceFingerprint } from "./magisSession.js";
+export {
+  MAGIS_STREAM_ORIGIN_KIND,
+  MAGIS_STREAM_SOURCE_ID,
+  MAGIS_STREAM_SOURCE_NAME,
+  createMagisStreamSource
+} from "./magisStreamSource.js";
 
 // Measured provider config location. It answers CORS *, so the web app can
 // fetch it directly without the proxy.
@@ -100,12 +109,14 @@ export async function createMagisVodClient({
     session,
     mediaTransport
   });
+  const live = createMagisLive({ portal, config: resolvedConfig, session, mediaTransport });
   return {
     config: resolvedConfig,
     crypto: magisCrypto,
     portal,
     session,
     vod,
+    live,
     proxyUrl: resolvedProxyUrl,
     resolveStream: vod.resolveStream
   };
