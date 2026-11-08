@@ -5,6 +5,8 @@ import {
   shouldAcceptRepeatMove,
   collapsedSourceIdsRef,
   toggleSourceCollapsed,
+  railMoveIndex,
+  railFocusAfterChange,
   KEYBOARD_KEYS,
   buildKeyboardLayout,
   keyboardFlatKeys,
@@ -211,9 +213,11 @@ export function createLiveScreenMethods03() {
         return;
       }
       this.lastRailMoveAt = now;
-      const next = clampIndex((this.railIndex || 0) + delta, items.length);
+      // Index-based over the CURRENT list, clamped at both ends: no wrap, no
+      // jump. At a boundary the index does not move and the ring stays put.
+      const next = railMoveIndex(items, this.railIndex, delta);
       if (next === this.railIndex) return;
-      this.railIndex = next;
+      this.setRailFocusIndex(next);
       this.applyFocusState({ smooth: true });
     },
 
@@ -240,7 +244,7 @@ export function createLiveScreenMethods03() {
       this.rowFocusTarget = "row";
       const selectionIndex = this.railItems().findIndex((item) => item.railId === String(this.railSelection ?? ""));
       if (selectionIndex >= 0) {
-        this.railIndex = selectionIndex;
+        this.setRailFocusIndex(selectionIndex);
       }
       this.applyFocusState({ smooth: true });
     },
@@ -268,6 +272,11 @@ export function createLiveScreenMethods03() {
     toggleSource(item) {
       const railId = String(item?.railId ?? "");
       if (!railId) return;
+      // Capture WHERE focus is before the list changes so it can be recovered
+      // by identity afterwards (never by a stale number).
+      const previousItems = this.railItems();
+      const previousIndex = clampIndex(this.railIndex || 0, previousItems.length);
+      const previousItem = previousItems[previousIndex] || null;
       const willExpand = !collapsedSourceIdsRef().has(railId);
       toggleSourceCollapsed(collapsedSourceIdsRef(), railId);
       if (this.toggleSourceRowsInPlace(item, willExpand)) {
@@ -275,6 +284,11 @@ export function createLiveScreenMethods03() {
         // The rail's geometry changed (rows inserted/removed): refresh the
         // cached offsets once so the next keypress still uses the cache.
         this.cacheLayoutMetrics?.();
+        // Identity-based focus recovery: the toggled header KEEPS the ring
+        // (its railId survives, so its index), a focused category whose rows
+        // just vanished lands on its source's header, and anything else
+        // clamps into the changed list. Focus never rests on a missing node.
+        this.setRailFocusIndex(railFocusAfterChange(this.railItems(), previousIndex, previousItem));
         this.applyFocusState({ smooth: true });
         return;
       }
@@ -404,7 +418,7 @@ export function createLiveScreenMethods03() {
         this.focusZone = "rail";
         const items = this.railItems();
         const searchIndex = items.findIndex((item) => item.type === "search");
-        this.railIndex = clampIndex(searchIndex, items.length);
+        this.setRailFocusIndex(searchIndex);
       }
       this.render({ preserveFocus: false });
     },

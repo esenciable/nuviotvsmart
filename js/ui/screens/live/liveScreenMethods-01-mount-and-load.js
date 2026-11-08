@@ -59,6 +59,10 @@ export function createLiveScreenMethods01() {
       this.focusZone = "rail";
       this.heroIndex = 0;
       this.railIndex = 0;
+      // WHICH rail item (by railId) the index points at: the rail index is
+      // re-derived from this identity whenever the item list changes, so a
+      // stale number can never leave focus on a missing or wrong row.
+      this.railFocusId = null;
       this.rowIndex = 0;
       this.rowFocusTarget = "row"; // "row" | "star"
 
@@ -277,7 +281,7 @@ export function createLiveScreenMethods01() {
       } else {
         this.focusZone = "rail";
         const index = this.railItems().findIndex((entry) => entry.railId === item.railId);
-        this.railIndex = internals.clampIndex(index, this.railItems().length);
+        this.setRailFocusIndex(index);
       }
       this.applyFocusState?.({ smooth: true });
     },

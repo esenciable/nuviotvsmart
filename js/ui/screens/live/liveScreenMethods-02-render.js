@@ -413,6 +413,50 @@ export function clampIndex(index, length) {
   return Math.min(max, Math.max(0, value));
 }
 
+// Index-based rail movement over the CURRENT item list: one item per step,
+// clamped at both ends — no wrap, no jump. UP at the first item stays put
+// (the key handler lifts focus to the hero instead) and DOWN at the last item
+// stays put with the ring visible. Garbage indices clamp to 0; an empty list
+// collapses to 0 so movement can never throw or dead-end.
+export function railMoveIndex(items, index, delta) {
+  const length = Array.isArray(items) ? items.length : 0;
+  if (length <= 0) return 0;
+  const from = clampIndex(index, length);
+  const step = Math.trunc(Number(delta) || 0);
+  return clampIndex(from + step, length);
+}
+
+// Where rail focus lands when the item list CHANGES (counts arriving, recents
+// appearing or disappearing, a source expanding/collapsing):
+//   1. the focused item's railId is still present -> its NEW index,
+//   2. the focused category vanished because its source collapsed -> that
+//      source's header (from the item's own sourceRailId, or discovered from
+//      the collapsed section's retained categories),
+//   3. otherwise -> the previous index clamped into the (shorter) list.
+// Focus must never rest on an index that no longer resolves to a node.
+export function railFocusAfterChange(nextItems, previousIndex, previousItem) {
+  const items = Array.isArray(nextItems) ? nextItems : [];
+  const previousId = String(previousItem?.railId ?? "");
+  if (previousId) {
+    const same = items.findIndex((item) => item?.railId === previousId);
+    if (same >= 0) return same;
+    const sourceRailId = String(previousItem?.sourceRailId ?? "");
+    if (sourceRailId) {
+      const header = items.findIndex((item) => item?.railId === sourceRailId);
+      if (header >= 0) return header;
+    }
+    if (previousId.startsWith("cat:")) {
+      const owner = items.find(
+        (item) =>
+          item?.type === "source" &&
+          (Array.isArray(item.categories) ? item.categories : []).some((category) => category?.railId === previousId)
+      );
+      if (owner) return items.indexOf(owner);
+    }
+  }
+  return clampIndex(previousIndex, items.length);
+}
+
 // Fluidity: held-key auto-repeat must advance the list at a steady cadence
 // instead of queuing behind the scroll animation. A repeat faster than the
 // cadence is dropped.
@@ -768,6 +812,11 @@ export function createLiveScreenMethods02() {
             }
             if (item.type === "source") {
               const expanded = item.expanded !== false;
+              // ONLY the header here: the category rows are separate items in
+              // the flat model below and are rendered exactly once each.
+              // Emitting them inline too duplicated every row in the DOM and
+              // desynchronised data-rail-index from the model after every
+              // surgical toggle — the root cause of the stuck rail movement.
               return `
                 <div class="live-rail-row live-source-header focusable"
                      role="button"
@@ -779,7 +828,6 @@ export function createLiveScreenMethods02() {
                   <span class="live-rail-label">${escapeHtml(item.label)}</span>
                   <span class="live-rail-count">${escapeHtml(countLabel(item.count))}</span>
                 </div>
-                ${expanded ? item.categories.map((category) => this.renderRailCategory(category)).join("") : ""}
               `;
             }
             if (item.type === "category") {
@@ -829,6 +877,17 @@ export function createLiveScreenMethods02() {
           : 0,
         recentCount: Array.isArray(this.recentChannels) ? this.recentChannels.length : 0
       });
+    },
+
+    // Writes a rail focus index and remembers WHICH item (by railId) the index
+    // points at, so any later change of the item list (counts arriving,
+    // recents appearing, a source collapsing) can re-derive the index by
+    // identity instead of leaving a stale number behind.
+    setRailFocusIndex(index) {
+      const items = this.railItems();
+      this.railIndex = clampIndex(index, items.length);
+      this.railFocusId = items[this.railIndex]?.railId ?? null;
+      return this.railIndex;
     },
 
     // The union of every cached per-category channel list, deduplicated by the
@@ -903,7 +962,6 @@ export function createLiveScreenMethods02() {
     // item count and bounces impossible zones back to a reachable one so no
     // state can dead-end the D-pad (loading, empty category, error).
     normalizeFocusState() {
-      const railLength = this.railItems().length;
       if (this.focusZone === "keyboard") {
         // The keyboard keys are a fixed set: the index always clamps into it.
         this.keyboardIndex = clampIndex(Number.isInteger(this.keyboardIndex) ? this.keyboardIndex : 0, KEYBOARD_KEY_COUNT);
@@ -929,7 +987,25 @@ export function createLiveScreenMethods02() {
       }
       // Rail zone (or bounced back into it): the search row always exists.
       this.focusZone = "rail";
-      this.railIndex = clampIndex(Number.isInteger(this.railIndex) ? this.railIndex : 0, railLength);
+      // Re-derive the rail index by IDENTITY every time the list could have
+      // changed (a render, counts arriving, recents appearing or disappearing,
+      // a source collapsing): a bare index silently points at the wrong row.
+      const items = this.railItems();
+      const focusedId = String(this.railFocusId ?? "");
+      let sourceRailId = "";
+      if (focusedId.startsWith("cat:")) {
+        const owner = items.find(
+          (item) =>
+            item.type === "source" &&
+            (Array.isArray(item.categories) ? item.categories : []).some((category) => category.railId === focusedId)
+        );
+        sourceRailId = owner?.railId ?? "";
+      }
+      this.railIndex = railFocusAfterChange(items, Number.isInteger(this.railIndex) ? this.railIndex : 0, {
+        railId: focusedId,
+        sourceRailId
+      });
+      this.railFocusId = items[this.railIndex]?.railId ?? null;
     },
 
     // Applies the deterministic focus state to the DOM: marks the focused
