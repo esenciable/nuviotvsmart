@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 const { sendRuntimeBeacon } = await import("../js/core/diagnostics/runtimeBeacon.js");
 
-const BEACON_URL = "http://192.168.18.5:8791/beacon";
+const BEACON_URL = "http://192.0.2.10:8791/beacon";
 
 function settle() {
   return new Promise((resolve) => setImmediate(resolve));
