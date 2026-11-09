@@ -37,6 +37,10 @@
 // COST CONTRACT (owner TV: 1 GB class, 120 MB app cap):
 //   - ONE request per round, bounded by the shared ESPN per-request budget
 //     (ESPN_REQUEST_TIMEOUT_MS) through the shared `fetchJsonBounded`,
+//   - at most THREE requests per day view: the endpoint is ROUND-based, so a
+//     day outside the current round costs the default measurement call plus
+//     the estimated round (plus one ±1 neighbour if the estimate misses) —
+//     see the day-resolution contract above `acbForDay`,
 //   - the parsed round is cached per ROUND for 30 minutes (fixtures move
 //     slowly; the visible day is re-filtered out of the cached list on every
 //     call),
@@ -48,6 +52,9 @@
 import { ESPN_REQUEST_TIMEOUT_MS, fetchJsonBounded, normalizeNow } from "./espnScores.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+// One jornada per week in the measured season (6015..6048 = J1..J34): the
+// unit the day->round estimate counts in.
+const WEEK_MS = 7 * DAY_MS;
 
 export const ACB_API_URL = "https://api2.acb.com/api/seasondata/Competition/matches";
 
@@ -243,11 +250,18 @@ function dayKeyOffset(dayKey) {
   return Number.isFinite(num) ? Math.trunc(num) : 0;
 }
 
-export function acbEventsForLocalDay(events, { dayKey = "0", now } = {}) {
-  const nowTs = normalizeNow(now);
+// The local day window a dayKey resolves to: [dayStart, dayEnd) in the
+// DEVICE's timezone — the same Ayer/Hoy/Mañana bucketing the rest of the
+// screen uses.
+function visibleDayRange(dayKey, nowTs) {
   const base = new Date(nowTs + dayKeyOffset(dayKey) * DAY_MS);
   const dayStart = new Date(base.getFullYear(), base.getMonth(), base.getDate()).getTime();
-  const dayEnd = dayStart + DAY_MS;
+  return { dayStart, dayEnd: dayStart + DAY_MS };
+}
+
+export function acbEventsForLocalDay(events, { dayKey = "0", now } = {}) {
+  const nowTs = normalizeNow(now);
+  const { dayStart, dayEnd } = visibleDayRange(dayKey, nowTs);
   return (Array.isArray(events) ? events : []).filter((event) => {
     const kickoff = Number(event?.kickoffMs);
     return Number.isFinite(kickoff) && kickoff > 0 && kickoff >= dayStart && kickoff < dayEnd;
@@ -259,13 +273,19 @@ export function acbEventsForLocalDay(events, { dayKey = "0", now } = {}) {
 // A failed round is NEVER stored — the next load retries it, like EuroLeague.
 const roundCache = new Map();
 
-// The round the last successful payload reported; it makes the current-round
-// request (no `roundId`) hit its own per-round entry on the next load.
+// The round the last successful payload reported (the API's current round) and
+// the measured `availableFilters.rounds` table ({id, roundNumber}[]) it
+// published. The table is what turns "the visible day sits N weeks away from
+// the current round" into a concrete round id — so it is remembered alongside
+// the cache and a warm current round can still be re-estimated for another day
+// without a second measurement request.
 let currentRoundId = null;
+let availableRounds = [];
 
 export function clearAcbCache() {
   roundCache.clear();
   currentRoundId = null;
+  availableRounds = [];
 }
 
 function cacheKeyFor(roundId) {
@@ -277,11 +297,67 @@ function failureResult() {
   return { events: [], failed: 1, failedCompetitions: [ACB_SOURCE_LABEL] };
 }
 
-// One day round for the fourth source: the current round (or an explicit
-// `roundId`), fetched once through the shared bounded JSON helper, cached per
-// round for 30 minutes, filtered to the requested local day. NEVER throws: a
-// failing ACB is reported in `failedCompetitions` and the other sources stay
-// untouched (failure isolation). Returns { events, failed, failedCompetitions }.
+// The first-to-last kickoff span of a parsed round, or null without usable
+// events: the calendar footprint that decides whether a round COVERS a day.
+function eventRange(events) {
+  let min = Infinity;
+  let max = -Infinity;
+  for (const event of Array.isArray(events) ? events : []) {
+    const kickoff = Number(event?.kickoffMs);
+    if (Number.isFinite(kickoff) && kickoff > 0) {
+      if (kickoff < min) min = kickoff;
+      if (kickoff > max) max = kickoff;
+    }
+  }
+  return min === Infinity ? null : { min, max };
+}
+
+// Remember what one successful payload MEASURED: the round it answered for
+// (drives the per-round cache key of the next default call) and the season's
+// round table (drives the day->round estimate). Measured payloads always
+// carry both; a payload without them simply measures nothing new.
+function rememberMeasurement(payload) {
+  const reported = payloadRoundId(payload);
+  if (reported != null) currentRoundId = reported;
+  const rows = Array.isArray(payload?.availableFilters?.rounds)
+    ? payload.availableFilters.rounds
+    : [];
+  const rounds = [];
+  for (const row of rows) {
+    const id = positiveIntId(row?.id);
+    const num = Number(row?.roundNumber);
+    if (id != null && Number.isFinite(num)) rounds.push({ id, roundNumber: Math.trunc(num) });
+  }
+  if (rounds.length) availableRounds = rounds;
+}
+
+// THE DAY-ROUND PROBLEM (measured): the endpoint is ROUND-based, not
+// date-based — without `roundId` it answers with the CURRENT round only, and
+// unknown parameters are silently ignored (200, current round). A day view
+// therefore has to ASK FOR the round that covers the visible day:
+//
+//   1. the default call (no roundId) measures the current round AND the
+//      season's round table (`availableFilters.rounds` +
+//      `selectedFilters.round`),
+//   2. if the current round's calendar footprint covers the visible day, it
+//      is the answer (zero extra requests for days inside the current round),
+//   3. otherwise the target round is ESTIMATED from the week distance
+//      between the visible day and the current round's footprint, mapped
+//      through the measured round table, and fetched,
+//   4. a candidate is ACCEPTED only when the payload's `selectedFilters.round`
+//      equals the round requested AND at least one match falls inside the
+//      visible day; otherwise ONE neighbour (±1, direction taken from the
+//      dates the API actually returned) is tried,
+//   5. bounded to at most THREE requests per day view, cached per ROUND for
+//      30 minutes — switching days inside the same round costs nothing, and
+//      a round is never fetched twice while warm.
+//
+// HONESTY CONTRACT: matches are never invented. A day no round covers is an
+// empty SUCCESS; a real failure (network, non-2xx, unparsable, or a
+// `selectedFilters` mismatch on every attempt) is reported as failed — never
+// swapped for an empty-looking success.
+const ACB_REQUEST_BUDGET_PER_DAY_VIEW = 3;
+
 export async function acbForDay({
   dayKey = "0",
   fetchImpl = null,
@@ -295,49 +371,148 @@ export async function acbForDay({
     fetchImpl ||
     (typeof window !== "undefined" && typeof fetch === "function" ? fetch.bind(globalThis) : null);
 
-  const key = cacheKeyFor(roundId);
-  const cached = force || key == null ? null : roundCache.get(key);
-  if (cached && cached.expiresAt > nowTs) {
-    return {
-      events: acbEventsForLocalDay(cached.events, { dayKey, now: nowTs }),
-      failed: 0,
-      failedCompetitions: []
-    };
-  }
-  if (!fetchFn) {
-    // No fetch available (node --test arms no default fetch): an honest
-    // failure count, no network, no throw.
-    return failureResult();
-  }
-  try {
-    // `fetchJsonBounded` owns the timeout race and the body read (status
-    // verdict included); it takes no init, so the mandatory `x-apikey` header
-    // rides in through this thin transport shim.
-    const withKey = (url, init) => fetchFn(url, { ...(init ?? {}), headers: acbRequestHeaders() });
-    const payload = await fetchJsonBounded(
-      withKey,
-      acbMatchesUrl(roundId),
-      ESPN_REQUEST_TIMEOUT_MS
-    );
-    const parsed = parseAcbMatches(payload);
-    if (!parsed.length) {
-      // No usable match: an unparsable/empty read, not an empty day (a real
-      // round always carries matches). Not cached.
-      return failureResult();
+  const { dayStart, dayEnd } = visibleDayRange(dayKey, nowTs);
+
+  // Load ONE round through the shared bounded JSON helper (it owns the timeout
+  // race, the status verdict and the body read), cache it per round for 30
+  // minutes, and report what came back. Cache hits cost no budget; a network
+  // or parse failure is `ok: false` and never cached; an exhausted budget is
+  // indistinguishable from "not fetched" so the day stays honest.
+  const budget = { left: ACB_REQUEST_BUDGET_PER_DAY_VIEW };
+  const loadRound = async (id) => {
+    const key = cacheKeyFor(id);
+    const cached = force || key == null ? null : roundCache.get(key);
+    if (cached && cached.expiresAt > nowFn()) {
+      return {
+        ok: true,
+        events: cached.events,
+        reported: positiveIntId(id == null ? currentRoundId : id)
+      };
     }
-    const reported = payloadRoundId(payload) ?? positiveIntId(roundId);
-    if (reported != null) currentRoundId = reported;
-    const storeKey = cacheKeyFor(reported) ?? key;
-    if (storeKey) {
-      roundCache.set(storeKey, { expiresAt: nowFn() + ACB_CACHE_TTL_MS, events: parsed });
+    if (!fetchFn || budget.left <= 0) return { ok: false };
+    budget.left -= 1;
+    try {
+      // `fetchJsonBounded` owns the timeout race and the body read (status
+      // verdict included); it takes no init, so the mandatory `x-apikey`
+      // header rides in through this thin transport shim.
+      const withKey = (url, init) =>
+        fetchFn(url, { ...(init ?? {}), headers: acbRequestHeaders() });
+      const payload = await fetchJsonBounded(withKey, acbMatchesUrl(id), ESPN_REQUEST_TIMEOUT_MS);
+      const parsed = parseAcbMatches(payload);
+      if (!parsed.length) {
+        // No usable match: an unparsable/empty read, not an empty day (a real
+        // round always carries matches). Not cached.
+        return { ok: false };
+      }
+      const reported = payloadRoundId(payload) ?? positiveIntId(id);
+      rememberMeasurement(payload);
+      const storeKey = cacheKeyFor(reported) ?? key;
+      if (storeKey) {
+        roundCache.set(storeKey, { expiresAt: nowFn() + ACB_CACHE_TTL_MS, events: parsed });
+      }
+      return { ok: true, events: parsed, reported };
+    } catch (_) {
+      // Failed round: NOT cached, never a throw into the caller.
+      return { ok: false };
     }
-    return {
-      events: acbEventsForLocalDay(parsed, { dayKey, now: nowFn() }),
-      failed: 0,
-      failedCompetitions: []
-    };
-  } catch (_) {
-    // Failed source: NOT cached, never a throw into the caller.
-    return failureResult();
+  };
+
+  const dayView = (events) => ({
+    events: acbEventsForLocalDay(events, { dayKey, now: nowTs }),
+    failed: 0,
+    failedCompetitions: []
+  });
+
+  // An explicit roundId is an exact request, not a day search: fetch it,
+  // verify the payload actually answered for it (the API ignores unknown
+  // ids and answers 200 with the current round — never pass that off), and
+  // filter it to the visible day. One attempt, one request.
+  const explicitId = positiveIntId(roundId);
+  if (explicitId != null) {
+    const res = await loadRound(explicitId);
+    if (!res.ok || res.reported !== explicitId) return failureResult();
+    return dayView(res.events);
   }
+
+  // 1) The default call: the CURRENT round, measured.
+  const current = await loadRound(null);
+  if (!current.ok) return failureResult();
+  const currentEvents = current.events;
+  const currentRange = eventRange(currentEvents);
+  if (!currentRange) return failureResult();
+
+  // A round COVERS the day when its footprint overlaps the day window. If the
+  // current round covers it, it is the answer (its day filter may still be
+  // empty — a round can span a day without playing on it — and that is honest).
+  const coversDay = (range) => range.max >= dayStart && range.min < dayEnd;
+  if (coversDay(currentRange)) return dayView(currentEvents);
+
+  // 2) Estimate the target round: the week distance between the visible day
+  // and the current round's footprint, mapped through the measured table.
+  const rounds = availableRounds;
+  const numberById = new Map(rounds.map((r) => [r.id, r.roundNumber]));
+  const idByNumber = new Map(rounds.map((r) => [r.roundNumber, r.id]));
+  const currentNumber =
+    current.reported == null ? null : (numberById.get(current.reported) ?? null);
+  if (!rounds.length || currentNumber == null) {
+    // No round table to estimate with: the honest day view of what was
+    // measured, never a failure and never invented matches.
+    return dayView(currentEvents);
+  }
+  const minNumber = Math.min(...rounds.map((r) => r.roundNumber));
+  const maxNumber = Math.max(...rounds.map((r) => r.roundNumber));
+  const wanted = currentNumber + Math.round((dayStart - currentRange.min) / WEEK_MS);
+  // Clamp to the season so a day beyond the first/last jornada still asks the
+  // nearest real round instead of nobody.
+  const targetNumber = Math.min(Math.max(wanted, minNumber), maxNumber);
+  const candidateId = idByNumber.get(targetNumber);
+  if (candidateId == null) {
+    // A hole in the measured table: no round can be asked for — honest empty.
+    return dayView([]);
+  }
+
+  // Judge one attempt: a candidate is accepted only when the payload's
+  // `selectedFilters.round` equals the round requested; whichever round the
+  // API ACTUALLY returned also tells the search direction for the neighbour.
+  // Returns +1 (the covering round is later), -1 (earlier) or 0 (this round's
+  // footprint already overlaps the day: stop searching).
+  let verifiedEvents = null; // events of the last attempt that answered its own round
+  const judge = (id, events, reported) => {
+    if (reported === id) verifiedEvents = events;
+    const range = eventRange(events);
+    if (!range) return 0;
+    if (range.max < dayStart) return 1;
+    if (range.min >= dayEnd) return -1;
+    return 0;
+  };
+
+  // 3) The candidate, then ONE neighbour — at most three requests per view
+  // (the measured default call + candidate + neighbour).
+  let direction;
+  if (candidateId === current.reported) {
+    // The estimate points back at the measured round (a day just outside its
+    // footprint): already in hand, no refetch, judge it for free.
+    direction = judge(candidateId, currentEvents, current.reported);
+  } else {
+    const res = await loadRound(candidateId);
+    if (!res.ok) return failureResult(); // network/non-2xx/unparsable: a real failure
+    direction = judge(candidateId, res.events, res.reported);
+  }
+  if (direction !== 0) {
+    const neighbourId = idByNumber.get(targetNumber + direction);
+    if (neighbourId != null && neighbourId !== candidateId && neighbourId !== current.reported) {
+      const res = await loadRound(neighbourId);
+      if (!res.ok) return failureResult();
+      judge(neighbourId, res.events, res.reported);
+    }
+  }
+
+  if (verifiedEvents != null) {
+    // A round the API answered for truthfully was reached; it does not cover
+    // the day, so the day is honestly empty.
+    return dayView(verifiedEvents);
+  }
+  // Every attempt came back for a DIFFERENT round than requested: the API's
+  // answers cannot be trusted for this day — a failure, never an empty day.
+  return failureResult();
 }

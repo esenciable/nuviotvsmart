@@ -59,6 +59,44 @@ function jsonFetch(payload = PAYLOAD) {
   return { impl, calls };
 }
 
+// --- a ROUND-AWARE transport, built from the REAL payload -------------------
+// The measured season is weekly (6015..6048 = J1..J34), so a requested
+// roundId N weeks from 6021 is the real payload re-dated that many weeks and
+// reporting its own id. An id outside the season reproduces the measured trap:
+// the API ignores the parameter and answers 200 with the CURRENT round.
+function shiftDays(iso, days) {
+  return new Date(Date.parse(iso) + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function payloadForRound(targetRoundId, weeksLater) {
+  const payload = clone(PAYLOAD);
+  payload.selectedFilters = { ...payload.selectedFilters, round: targetRoundId };
+  payload.matches = payload.matches.map((match) => ({
+    ...match,
+    id: `${targetRoundId}-${match.id}`,
+    startDateTime: shiftDays(match.startDateTime, weeksLater * 7)
+  }));
+  return payload;
+}
+
+function roundAwareFetch() {
+  const calls = [];
+  const impl = async (url) => {
+    const urlStr = String(url);
+    calls.push(urlStr);
+    const m = /[?&]roundId=(\d+)/.exec(urlStr);
+    const requested = m ? Number(m[1]) : ROUND;
+    // Measured season: ids step by ONE per week (6015 = J1 .. 6048 = J34), so
+    // the week distance from the captured round IS the id difference.
+    const weeksLater = requested - ROUND;
+    if (!Number.isInteger(weeksLater) || weeksLater < -6 || weeksLater > 27) {
+      return { ok: true, status: 200, json: async () => clone(PAYLOAD) };
+    }
+    return { ok: true, status: 200, json: async () => payloadForRound(requested, weeksLater) };
+  };
+  return { impl, calls };
+}
+
 describe("acb: URL builder — roundId, never the silently-ignored round param", () => {
   test("the base request is the measured endpoint with the competition and the round filter", () => {
     assert.equal(ACB_API_URL, "https://api2.acb.com/api/seasondata/Competition/matches");
@@ -294,7 +332,7 @@ describe("acb: the day fetch — bounded JSON, x-apikey, per-round cache, failur
     const { impl, calls } = jsonFetch();
     const now = Date.parse(PAYLOAD.matches[0].startDateTime) + 60 * 60 * 1000;
     const result = await acbForDay({ dayKey: "0", fetchImpl: impl, now });
-    assert.equal(calls.length, 1, "one request per round");
+    assert.equal(calls.length, 1, "one request: the current round covers the visible day");
     assert.equal(calls[0].url, acbMatchesUrl(), "the current round, no roundId");
     assert.equal(calls[0].init.headers["x-apikey"], ACB_API_KEY, "the request carries x-apikey");
     assert.equal(calls[0].init.headers.accept, "application/json");
@@ -309,7 +347,7 @@ describe("acb: the day fetch — bounded JSON, x-apikey, per-round cache, failur
   test("the cache is keyed by ROUND: the current round is served warm, another round is fetched", async () => {
     clearAcbCache();
     const now = Date.parse(PAYLOAD.matches[0].startDateTime) + 60 * 60 * 1000;
-    const { impl, calls } = jsonFetch();
+    const { impl, calls } = roundAwareFetch();
     await acbForDay({ dayKey: "0", fetchImpl: impl, now });
     assert.equal(calls.length, 1);
     await acbForDay({ dayKey: "0", fetchImpl: impl, now }); // same round: the payload's roundId
@@ -318,11 +356,23 @@ describe("acb: the day fetch — bounded JSON, x-apikey, per-round cache, failur
     assert.equal(calls.length, 1, "an explicit roundId hits the SAME per-round entry");
     await acbForDay({ dayKey: "0", fetchImpl: impl, now, roundId: 6022 });
     assert.equal(calls.length, 2, "another round is its own cache entry");
-    assert.match(calls[1].url, /roundId=6022(&|$)/);
+    assert.match(calls[1], /roundId=6022(&|$)/);
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now, roundId: 6022 });
+    assert.equal(calls.length, 2, "the fetched round is warm too");
     await acbForDay({ dayKey: "0", fetchImpl: impl, now });
     assert.equal(calls.length, 2, "the current round is still warm");
     await acbForDay({ dayKey: "0", fetchImpl: impl, now, force: true });
     assert.equal(calls.length, 3, "force bypasses the cache");
+  });
+
+  test("an explicit roundId the API does not honour (mismatched selectedFilters) is a failure", async () => {
+    clearAcbCache();
+    const now = Date.parse(PAYLOAD.matches[0].startDateTime) + 60 * 60 * 1000;
+    const { impl } = roundAwareFetch(); // id 9999 is off-season: answered with round 6021
+    const result = await acbForDay({ dayKey: "0", fetchImpl: impl, now, roundId: 9999 });
+    assert.equal(result.failed, 1, "a payload for another round is never passed off");
+    assert.deepEqual(result.failedCompetitions, [ACB_SOURCE_LABEL]);
+    assert.deepEqual(result.events, []);
   });
 
   test("the round is revalidated after 30 minutes and the day filter re-runs per call", async () => {
@@ -392,6 +442,162 @@ describe("acb: the day fetch — bounded JSON, x-apikey, per-round cache, failur
     assert.deepEqual(result.events, []);
     assert.equal(result.failed, 1);
     assert.deepEqual(result.failedCompetitions, [ACB_SOURCE_LABEL]);
+  });
+});
+
+describe("acb: the day view resolves the round that COVERS the visible day", () => {
+  // A three-round synthetic season with KNOWN calendar footprints: one jornada
+  // per week, two matches per match day at LOCAL NOON (so the local-day
+  // bucketing is timezone-proof). The current round (100) plays 7-8 Nov; the
+  // screen's visible days 14/15 Nov belong to round 101 — the measured bug.
+  const SEASON_NOW = new Date(2026, 10, 14, 12, 0, 0).getTime(); // Sat 14 Nov 2026, local noon
+  const SEASON_ROUNDS = [
+    { id: 100, roundNumber: 1, days: [[2026, 10, 7], [2026, 10, 8]] },
+    { id: 101, roundNumber: 2, days: [[2026, 10, 14], [2026, 10, 15]] },
+    { id: 102, roundNumber: 3, days: [[2026, 10, 21], [2026, 10, 22]] }
+  ];
+
+  const localNoonIso = ([year, month, day]) =>
+    new Date(year, month, day, 12, 0, 0).toISOString();
+
+  function seasonPayload(round, reportedRoundId) {
+    const teams = [
+      { id: 1, fullName: "Sideralistes", abbreviatedName: "SID", primaryColorHex: "#101010", logo: "sid.png" },
+      { id: 2, fullName: "Navantinos", abbreviatedName: "NAV", primaryColorHex: "#202020", logo: "nav.png" }
+    ];
+    let n = 0;
+    const matches = [];
+    for (const day of round.days) {
+      for (let i = 0; i < 2; i++) {
+        matches.push({
+          id: `${round.id}-${++n}`,
+          startDateTime: localNoonIso(day),
+          matchStatus: "NOT_STARTED",
+          homeTeamId: 1,
+          awayTeamId: 2,
+          currentQuarter: 0,
+          broadcastChannels: []
+        });
+      }
+    }
+    return {
+      selectedFilters: { competition: 1, season: 91, round: reportedRoundId, isRoundSelected: true },
+      availableFilters: { rounds: SEASON_ROUNDS.map((r) => ({ id: r.id, roundNumber: r.roundNumber })) },
+      teams,
+      matches
+    };
+  }
+
+  // The measured API behaviour: a honoured roundId serves THAT round reporting
+  // its own id; an ignored roundId (the first `ignoreRoundIdTimes` explicit
+  // requests) answers 200 with the CURRENT round. failRoundIds throw.
+  function seasonTransport({ currentRoundId = 100, ignoreRoundIdTimes = 0, failRoundIds = [] } = {}) {
+    const calls = [];
+    let ignored = 0;
+    const impl = async (url) => {
+      const urlStr = String(url);
+      calls.push(urlStr);
+      const m = /[?&]roundId=(\d+)/.exec(urlStr);
+      const requested = m ? Number(m[1]) : null;
+      let served = null;
+      let reported = currentRoundId;
+      if (requested != null) {
+        if (failRoundIds.includes(requested)) throw new Error("network down");
+        const found = SEASON_ROUNDS.find((r) => r.id === requested);
+        if (found && ignored >= ignoreRoundIdTimes) {
+          served = found;
+          reported = found.id;
+        } else {
+          ignored += 1; // the trap: the id is silently dropped, the current round comes back
+        }
+      }
+      if (!served) served = SEASON_ROUNDS.find((r) => r.id === currentRoundId);
+      return { ok: true, status: 200, json: async () => seasonPayload(served, reported) };
+    };
+    return { impl, calls };
+  }
+
+  test("the round covering the visible day is chosen, verified against selectedFilters", async () => {
+    clearAcbCache();
+    const { impl, calls } = seasonTransport();
+    const result = await acbForDay({ dayKey: "0", fetchImpl: impl, now: SEASON_NOW });
+    assert.equal(result.failed, 0);
+    assert.deepEqual(result.failedCompetitions, []);
+    assert.deepEqual(
+      result.events.map((e) => e.id),
+      ["acb:101-1", "acb:101-2"],
+      "Saturday 14 November belongs to round 101, not to the current round 100"
+    );
+    assert.equal(calls.length, 2, "the default measurement call plus the estimated round");
+    assert.equal(calls[0], acbMatchesUrl(), "the default call measures the current round");
+    assert.match(calls[1], /[?&]roundId=101(&|$)/);
+  });
+
+  test("switching days inside the same round costs nothing: per-round cache, never fetched twice", async () => {
+    clearAcbCache();
+    const { impl, calls } = seasonTransport();
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now: SEASON_NOW });
+    assert.equal(calls.length, 2);
+    const sunday = await acbForDay({ dayKey: "1", fetchImpl: impl, now: SEASON_NOW });
+    assert.equal(calls.length, 2, "day +1 is inside the cached round 101: zero requests");
+    assert.deepEqual(sunday.events.map((e) => e.id), ["acb:101-3", "acb:101-4"]);
+    const saturday = await acbForDay({ dayKey: "0", fetchImpl: impl, now: SEASON_NOW });
+    assert.equal(calls.length, 2, "and back to Saturday: zero requests again");
+    assert.equal(saturday.events.length, 2);
+    const friday = await acbForDay({ dayKey: "-1", fetchImpl: impl, now: SEASON_NOW });
+    assert.equal(calls.length, 2, "13 November: both neighbours are already cached");
+    assert.deepEqual(friday.events, [], "no round plays on Friday 13 November");
+    assert.equal(friday.failed, 0, "an uncovered day is honest emptiness, not a failure");
+  });
+
+  test("a mismatched selectedFilters on the candidate triggers the neighbour attempt", async () => {
+    clearAcbCache();
+    const { impl, calls } = seasonTransport({ ignoreRoundIdTimes: 1 });
+    const result = await acbForDay({ dayKey: "0", fetchImpl: impl, now: SEASON_NOW });
+    assert.match(calls[1], /roundId=101/, "the estimated candidate is requested first");
+    assert.match(calls[2], /roundId=102/, "the mismatch moves the search to the neighbour");
+    assert.equal(calls.length, 3, "three requests per day view, never more");
+    assert.deepEqual(result.events, [], "a round that does not cover the day lends no matches");
+    assert.equal(result.failed, 0, "a verified round answered; the API works");
+  });
+
+  test("a selectedFilters mismatch on EVERY attempt is a failure, not an empty day", async () => {
+    clearAcbCache();
+    const { impl, calls } = seasonTransport({ ignoreRoundIdTimes: 99 });
+    const result = await acbForDay({ dayKey: "0", fetchImpl: impl, now: SEASON_NOW });
+    assert.equal(calls.length, 3, "bounded: default + candidate + one neighbour");
+    assert.equal(result.failed, 1);
+    assert.deepEqual(result.failedCompetitions, [ACB_SOURCE_LABEL]);
+    assert.deepEqual(result.events, []);
+  });
+
+  test("the request count stays within 3 per day view across the whole +/-7 window", async () => {
+    clearAcbCache();
+    const { impl, calls } = seasonTransport();
+    for (const dayKey of ["-7", "-6", "-1", "0", "1", "4", "5", "6", "7"]) {
+      const before = calls.length;
+      const result = await acbForDay({ dayKey, fetchImpl: impl, now: SEASON_NOW });
+      assert.ok(calls.length - before <= 3, `dayKey ${dayKey}: ${calls.length - before} requests`);
+      assert.equal(result.failed, 0, `dayKey ${dayKey} is never a failure in a healthy season`);
+    }
+  });
+
+  test("a day no round covers is an honest empty result, never a failure", async () => {
+    clearAcbCache();
+    const { impl } = seasonTransport();
+    const result = await acbForDay({ dayKey: "4", fetchImpl: impl, now: SEASON_NOW }); // Wed 18 Nov
+    assert.deepEqual(result.events, []);
+    assert.equal(result.failed, 0);
+    assert.deepEqual(result.failedCompetitions, []);
+  });
+
+  test("a real failure on the covering round is reported as failed, never as an empty day", async () => {
+    clearAcbCache();
+    const { impl } = seasonTransport({ failRoundIds: [101] });
+    const result = await acbForDay({ dayKey: "0", fetchImpl: impl, now: SEASON_NOW });
+    assert.equal(result.failed, 1);
+    assert.deepEqual(result.failedCompetitions, [ACB_SOURCE_LABEL]);
+    assert.deepEqual(result.events, []);
   });
 });
 
