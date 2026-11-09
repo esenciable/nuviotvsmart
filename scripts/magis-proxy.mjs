@@ -95,6 +95,25 @@ function createMagisProxyServer({ config, log = () => {} } = {}) {
       return;
     }
 
+    // A bare visit to this host used to answer a 404 that reads like a fault.
+    // It is not one: this server only proxies the portal, and the app itself
+    // lives on its own URL. Say so, so a browser visit is not mistaken for a
+    // broken deployment.
+    if (
+      !match &&
+      request.method === "GET" &&
+      (url.pathname === "/" || url.pathname === "/health")
+    ) {
+      sendJson(response, 200, {
+        ok: true,
+        service: "magis-proxy",
+        purpose: "adds CORS headers to the Magis portal so a browser app can call it",
+        use: "POST /magis/<host>/api/portalCore/<path>",
+        note: "the app is served from its own URL; this host only answers the route above"
+      });
+      return;
+    }
+
     if (!match) {
       sendJson(response, 404, {
         error: `magis-proxy: unsupported route ${request.method} ${url.pathname}`
