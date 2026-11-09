@@ -15,3 +15,6 @@ services/**/runtime
 # Captured API payloads are evidence, not source: they stay byte-identical to
 # what the endpoint served, so the tests assert against the real answer.
 tests/fixtures
+
+# Generated catalog index: written compact on purpose (a 98 KB line, not 226 KB formatted)
+js/core/magis/catalog-index.json

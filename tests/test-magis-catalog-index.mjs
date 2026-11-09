@@ -11,7 +11,8 @@ import {
   GENERIC_CATEGORY_NAME,
   isGenericCategoryName,
   computeCatalogOwnership,
-  buildCatalogIndex
+  buildCatalogIndex,
+  serializeCatalogIndex
 } from "../scripts/magis-catalog-index.mjs";
 
 // Catalog fixtures: Deportes (42) then Cine (43) then the generic
@@ -186,7 +187,7 @@ describe("buildCatalogIndex (the shipped JSON shape)", () => {
       ]),
       generatedAt: "2026-02-11T00:00:00.000Z"
     });
-    assert.deepEqual(Object.keys(index).sort(), ["categories", "generatedAt", "genericCategoryName", "leftovers"]);
+    assert.deepEqual(Object.keys(index).sort(), ["categories", "channels", "generatedAt", "genericCategoryName", "leftovers"]);
     assert.equal(index.generatedAt, "2026-02-11T00:00:00.000Z");
     assert.equal(index.genericCategoryName, "ChannelList");
     assert.deepEqual(
@@ -200,6 +201,15 @@ describe("buildCatalogIndex (the shipped JSON shape)", () => {
     assert.deepEqual(index.leftovers, [
       { code: "ztv", name: "ZTV", number: 5 },
       { code: "orphan", name: "Orphan", number: null }
+    ]);
+    // The global search corpus: EVERY unique channel, each with its owner.
+    assert.deepEqual(index.channels, [
+      { code: "espn", name: "ESPN", number: 1, owner: "42" },
+      { code: "fox", name: "Fox Sports", number: 2, owner: "42" },
+      { code: "hbo", name: "HBO", number: 3, owner: "43" },
+      { code: "tcm", name: "TCM", number: 4, owner: "43" },
+      { code: "ztv", name: "ZTV", number: 5, owner: "7" },
+      { code: "orphan", name: "Orphan", number: null, owner: "7" }
     ]);
   });
 
@@ -221,13 +231,128 @@ describe("buildCatalogIndex (the shipped JSON shape)", () => {
   });
 });
 
+describe("computeCatalogOwnership channels (the global search corpus)", () => {
+  test("emits every unique channel exactly once, owned per the dedupe rule, in catalog order", () => {
+    const { channels, owners } = ownershipFor([
+      ["42", DEPORTES],
+      ["43", CINE],
+      ["7", CHANNELLIST]
+    ]);
+    assert.deepEqual(channels, [
+      { code: "espn", name: "ESPN", number: 1, owner: "42" },
+      { code: "fox", name: "Fox Sports", number: 2, owner: "42" },
+      { code: "hbo", name: "HBO", number: 3, owner: "43" },
+      { code: "tcm", name: "TCM", number: 4, owner: "43" },
+      { code: "ztv", name: "ZTV", number: 5, owner: "7" },
+      { code: "orphan", name: "Orphan", number: null, owner: "7" }
+    ]);
+    // Every owner agrees with the shipped ownership map.
+    for (const entry of channels) {
+      assert.equal(entry.owner, owners.get(entry.code));
+    }
+  });
+
+  test("the channel total matches the sum of the deduped category counts", () => {
+    const { channels, counts } = ownershipFor([
+      ["42", DEPORTES],
+      ["43", CINE],
+      ["7", CHANNELLIST]
+    ]);
+    const total = Array.from(counts.values()).reduce((sum, count) => sum + count, 0);
+    assert.equal(channels.length, total);
+  });
+
+  test("the dedupe rule holds: no channel is owned by two categories", () => {
+    const { channels } = ownershipFor([
+      ["42", DEPORTES],
+      ["43", CINE],
+      ["7", CHANNELLIST]
+    ]);
+    const codes = channels.map((entry) => entry.code);
+    assert.equal(new Set(codes).size, codes.length, "codes are unique");
+    const columnIds = new Set(CATEGORIES.map((category) => String(category.columnId)));
+    for (const entry of channels) {
+      assert.equal(columnIds.has(entry.owner), true, `owner of ${entry.code} is a catalog category`);
+    }
+  });
+
+  test("a channel listed twice inside its own category still appears once", () => {
+    const { channels } = computeCatalogOwnership({
+      categories: CATEGORIES,
+      channelsByCategory: cachesFor([["42", [...DEPORTES, DEPORTES[0]]]]) // espn duplicated in Deportes
+    });
+    assert.deepEqual(
+      channels.map((entry) => entry.code),
+      ["espn", "fox"]
+    );
+  });
+});
+
+describe("serializeCatalogIndex (the shipped bytes stay small on a memory-capped TV)", () => {
+  const index = buildCatalogIndex({
+    categories: CATEGORIES,
+    channelsByCategory: cachesFor([
+      ["42", DEPORTES],
+      ["43", CINE],
+      ["7", CHANNELLIST]
+    ]),
+    generatedAt: "2026-02-11T00:00:00.000Z"
+  });
+
+  test("round-trips: parsing the serialized bytes reproduces the index exactly", () => {
+    assert.deepEqual(JSON.parse(serializeCatalogIndex(index)), index);
+  });
+
+  test("the channels array is written as ONE compact line; categories and leftovers stay pretty-printed", () => {
+    const text = serializeCatalogIndex(index);
+    const lines = text.split("\n");
+    const channelLines = lines.filter((line) => line.includes('"channels"'));
+    assert.equal(channelLines.length, 1, "exactly one channels line");
+    // The whole array lives on that single line (compact) and parses back.
+    const compactPart = channelLines[0].slice(channelLines[0].indexOf('"channels"'));
+    assert.match(compactPart, /^"channels": \[\{.*\}\],?$/);
+    assert.deepEqual(JSON.parse(`{${compactPart.replace(/,$/, "")}}`).channels, index.channels);
+    // The rest keeps the human-readable pretty form.
+    assert.match(text, /"categories": \[/);
+    assert.match(text, /"leftovers": \[/);
+  });
+});
+
 describe("the shipped js/core/magis/catalog-index.json", () => {
   const raw = readFileSync(new URL("../js/core/magis/catalog-index.json", import.meta.url), "utf8");
   const index = JSON.parse(raw);
 
-  test("has exactly the four contract keys", () => {
-    assert.deepEqual(Object.keys(index).sort(), ["categories", "generatedAt", "genericCategoryName", "leftovers"]);
-    assert.equal(index.genericCategoryName, "ChannelList");
+  test("carries the legacy contract keys; once regenerated with the global list, exactly one channels key joins them", () => {
+    const keys = Object.keys(index).sort();
+    for (const key of ["categories", "generatedAt", "genericCategoryName", "leftovers"]) {
+      assert.equal(keys.includes(key), true, `legacy key ${key} is present`);
+    }
+    // The shipped file is regenerated by the parent (`npm run catalog:index`,
+    // network walk). Until then it is the pre-channels index; afterwards the
+    // channels key MUST be the only addition.
+    if (Array.isArray(index.channels)) {
+      assert.deepEqual(keys, ["categories", "channels", "generatedAt", "genericCategoryName", "leftovers"]);
+    }
+  });
+
+  test("when the index carries channels, every entry is { code, name, number, owner } with a unique code and a valid owner", () => {
+    if (!Array.isArray(index.channels)) return; // pre-channels index (see above)
+    const columnIds = new Set((index.categories || []).map((entry) => String(entry?.columnId ?? "").trim()));
+    const seen = new Set();
+    for (const entry of index.channels) {
+      assert.deepEqual(Object.keys(entry).sort(), ["code", "name", "number", "owner"]);
+      const code = String(entry?.code ?? "").trim();
+      assert.equal(code !== "", true, "non-empty code");
+      assert.equal(seen.has(code), false, `channel ${code} appears exactly once`);
+      seen.add(code);
+      assert.equal(columnIds.has(String(entry?.owner ?? "").trim()), true, `owner of ${code} is a catalog category`);
+    }
+  });
+
+  test("when channels are present, the total matches the sum of the deduped category counts", () => {
+    if (!Array.isArray(index.channels)) return; // pre-channels index (see above)
+    const total = (index.categories || []).reduce((sum, entry) => sum + (Number(entry?.count) || 0), 0);
+    assert.equal(index.channels.length, total);
   });
 
   test("every category entry is { columnId, name, count } with a non-negative integer count", () => {

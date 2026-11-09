@@ -15,9 +15,11 @@
 // category beats the generic catalogue page (`ChannelList`, case-insensitive),
 // the FIRST specific category in catalog order containing a channel owns it,
 // and the generic catalogue keeps only the unclaimed channels. The index
-// carries the per-category counts AFTER dedupe plus the generic catalogue's
-// leftovers, so the TV renders rail counts and the ChannelList without
-// fetching anything extra.
+// carries the per-category counts AFTER dedupe, the generic catalogue's
+// leftovers, and the COMPLETE channel list `{ code, name, number, owner }`
+// (the global search corpus: every unique channel exactly once, each with the
+// columnId of the category that owns it), so the TV renders rail counts, the
+// ChannelList and a GLOBAL channel search without fetching anything extra.
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -54,11 +56,14 @@ export function isGenericCategoryName(name, genericName = GENERIC_CATEGORY_NAME)
 //   - a SPECIFIC category claims a channel before the generic catalogue and
 //     before any LATER specific one (first specific wins),
 //   - the generic catalogue claims only channels nothing specific claimed.
-// Returns { owners, counts, leftovers }:
+// Returns { owners, counts, leftovers, channels }:
 //   owners:    Map channelId(code) -> owning columnId (as string)
 //   counts:    Map columnId (as string) -> count AFTER dedupe
 //   leftovers: the generic catalogue's unclaimed channels, in catalog order,
 //              as { code, name, number }
+//   channels:  EVERY unique channel exactly once, in catalog order, as
+//              { code, name, number, owner } where owner is the owning
+//              category's columnId (as string) — the global search corpus.
 export function computeCatalogOwnership({
   categories = [],
   channelsByCategory = new Map(),
@@ -70,6 +75,8 @@ export function computeCatalogOwnership({
   const counts = new Map();
   const leftovers = [];
   const genericColumnIds = new Set();
+  const channels = [];
+  const seenChannelCodes = new Set();
   // Pass 1 — ownership, in catalog order (the shipped rule).
   for (const category of Array.isArray(categories) ? categories : []) {
     const columnId = String(category?.columnId ?? "").trim();
@@ -112,21 +119,33 @@ export function computeCatalogOwnership({
           name: String(channel?.name ?? ""),
           number: channel?.number ?? null
         });
+      // The global search corpus: the owning category's own row (a channel
+      // listed twice inside its category still appears exactly once).
+      if (!seenChannelCodes.has(code)) {
+        seenChannelCodes.add(code);
+        channels.push({
+          code,
+          name: String(channel?.name ?? ""),
+          number: channel?.number ?? null,
+          owner: columnId
+        });
+      }
     }
     counts.set(columnId, count);
   }
-  return { owners, counts, leftovers };
+  return { owners, counts, leftovers, channels };
 }
 
 // Pure: the shipped index object. `categories` keeps the portal's catalog
-// order (every category appears, empty ones included, count 0).
+// order (every category appears, empty ones included, count 0); `channels`
+// is the complete post-dedupe channel list (the global search corpus).
 export function buildCatalogIndex({
   categories = [],
   channelsByCategory = new Map(),
   generatedAt,
   genericCategoryName = GENERIC_CATEGORY_NAME
 } = {}) {
-  const { counts, leftovers } = computeCatalogOwnership({
+  const { counts, leftovers, channels } = computeCatalogOwnership({
     categories,
     channelsByCategory,
     genericCategoryName
@@ -141,8 +160,25 @@ export function buildCatalogIndex({
         name: String(category?.name ?? ""),
         count: counts.get(String(category.columnId).trim()) ?? 0
       })),
+    channels,
     leftovers
   };
+}
+
+// Pure: the shipped BYTES. Categories and leftovers stay pretty-printed (a
+// human can audit them); the channels array — the bulk of the file at ~1k
+// entries — is written as ONE compact line, because pretty-printing it would
+// roughly double the JSON a memory-capped TV (Samsung's 120 MB app cap)
+// inlines into the bundle. Deterministic: parsing the output reproduces the
+// index exactly.
+export function serializeCatalogIndex(index) {
+  const CHANNELS_PLACEHOLDER = "__NUVIO_CHANNELS_ONE_LINE__";
+  const text = JSON.stringify({ ...index, channels: CHANNELS_PLACEHOLDER }, null, 2);
+  // A function replacement: channel names may contain `$` sequences that a
+  // string replacement would misinterpret.
+  return text.replace(JSON.stringify(CHANNELS_PLACEHOLDER), () =>
+    JSON.stringify(index?.channels ?? [])
+  );
 }
 
 // Walks every category through the real client, ONE category at a time — the
@@ -192,9 +228,12 @@ async function main() {
     channelsByCategory,
     generatedAt: new Date().toISOString()
   });
-  await writeFile(DEFAULT_OUTPUT_PATH, `${JSON.stringify(index, null, 2)}\n`);
+  await writeFile(DEFAULT_OUTPUT_PATH, `${serializeCatalogIndex(index)}\n`);
   // e.g. "500 -> 64": the raw catalogue page size vs the leftovers it keeps.
   console.log(`magis-catalog-index: ${rawCatalogueCount} -> ${index.leftovers.length}`);
+  console.log(
+    `magis-catalog-index: ${index.channels.length} unique channels indexed for global search`
+  );
   console.log(`magis-catalog-index: wrote ${DEFAULT_OUTPUT_PATH}`);
 }
 

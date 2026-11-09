@@ -294,8 +294,9 @@ export function queryLineView(query) {
 // is computed OFFLINE by `npm run catalog:index`
 // (scripts/magis-catalog-index.mjs) and shipped as
 // js/core/magis/catalog-index.json: { generatedAt, genericCategoryName,
-// categories: [{ columnId, name, count }], leftovers: [{ code, name,
-// number }] } — counts AFTER dedupe, plus the generic catalogue's leftovers.
+// categories: [{ columnId, name, count }], channels: [{ code, name, number,
+// owner }], leftovers: [{ code, name, number }] } — counts AFTER dedupe, the
+// complete global search corpus, plus the generic catalogue's leftovers.
 // The screen only READS the index: no runtime ownership computation and no
 // background walk of all categories. An absent/stale index degrades: counts
 // render "…", the generic catalogue falls back to its portal fetch, and
@@ -365,6 +366,46 @@ export function leftoverChannelsFromIndex(index) {
       tvgId: null,
       group: null,
       groupName: String(index.genericCategoryName ?? GENERIC_CATEGORY_NAME)
+    });
+  }
+  return channels;
+}
+
+// Pure: EVERY Magis channel of the index as searchable rows — the global
+// search corpus. Ordered by the catalog (category order), each row carries
+// `ownerName`, its OWNING category's display name, so a result row shows where
+// the channel lives even when that category was never opened this session.
+// A stale index (no channels list) and an unusable index both yield NO rows:
+// the caller falls back to searching the loaded per-category caches. No
+// `logo` field: nothing on this screen reads one.
+export function searchChannelsFromIndex(index) {
+  if (!isUsableCatalogIndex(index)) return [];
+  const list = Array.isArray(index.channels) ? index.channels : [];
+  if (!list.length) return [];
+  const categoryNames = new Map();
+  for (const entry of Array.isArray(index.categories) ? index.categories : []) {
+    const columnId = String(entry?.columnId ?? "").trim();
+    const name = String(entry?.name ?? "").trim();
+    if (columnId && name && !categoryNames.has(columnId)) categoryNames.set(columnId, name);
+  }
+  const seen = new Set();
+  const channels = [];
+  for (const entry of list) {
+    const code = String(entry?.code ?? "").trim();
+    if (!code || seen.has(code)) continue;
+    seen.add(code);
+    const owner = String(entry?.owner ?? "").trim();
+    const ownerName = categoryNames.get(owner) || "";
+    channels.push({
+      id: `magis:live:${code}`,
+      code,
+      name: String(entry?.name ?? "").trim() || "Canal en vivo",
+      number: entry?.number ?? null,
+      epgChannelId: null,
+      tvgId: null,
+      group: null,
+      groupName: ownerName || String(index.genericCategoryName ?? GENERIC_CATEGORY_NAME),
+      ownerName
     });
   }
   return channels;
@@ -1447,7 +1488,9 @@ export function createLiveScreenMethods02() {
     renderChannelRowInner(channel) {
       const label = formatChannelRowLabel(channel);
       const isFavorite = this.isFavoriteId(channel?.id);
-      const source = sourceNameFromChannelId(channel?.id) || sourceNameFromColumnId(channel?.group);
+      // A global search result row shows its OWNING category's name; every
+      // other row keeps the source label (Magis / PremiumTV).
+      const source = channel?.ownerName || sourceNameFromChannelId(channel?.id) || sourceNameFromColumnId(channel?.group);
       return `
         <div class="live-row-text">
           <div class="live-row-name">${escapeHtml(label.name)}</div>

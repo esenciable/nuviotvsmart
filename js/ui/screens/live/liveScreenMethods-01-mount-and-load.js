@@ -1,5 +1,6 @@
 /* eslint-disable no-unused-vars */
 import * as internals from "./liveScreen.js";
+import { searchChannelsFromIndex } from "./liveScreenMethods-02-render.js";
 
 function clampRowIndexValue(index, length) {
   const max = Math.max(0, (Array.isArray(length) ? length.length : Number(length) || 0) - 1);
@@ -24,10 +25,13 @@ function currentRouteSafe(router) {
 // catalogue's leftovers come from the GENERATED catalog index shipped with
 // the app (js/core/magis/catalog-index.json, built offline by `npm run
 // catalog:index`) — the screen never walks all categories in the background
-// and never computes channel ownership at runtime. Categories load on demand
-// when selected: one fetch each, no speculative loading. An absent/stale
-// index degrades gracefully: counts render "…", the generic catalogue falls
-// back to its portal fetch, and tune-in surfaces the real portal error.
+// and never computes channel ownership at runtime. Search reads the index's
+// complete channel list (every category, loaded or not) and falls back to the
+// loaded per-category caches while the index is missing or stale. Categories
+// load on demand when selected: one fetch each, no speculative loading. An
+// absent/stale index degrades gracefully: counts render "…", the generic
+// catalogue falls back to its portal fetch, search falls back to the loaded
+// caches, and tune-in surfaces the real portal error.
 //
 // Every repository call is abortable through a token + controller pair so
 // leaving the screen or switching categories cancels the pending work.
@@ -294,15 +298,40 @@ export function createLiveScreenMethods01() {
       const query = this.searchActive ? String(this.searchQuery || "").trim() : "";
       const caches = this.channelsByColumn instanceof Map ? this.channelsByColumn : new Map();
       if (query) {
-        // Search filters the LOADED channels: the deduplicated union of every
-        // cached per-category list.
-        const union = new Map();
-        for (const list of caches.values()) {
-          for (const channel of Array.isArray(list) ? list : []) {
-            if (!union.has(String(channel?.id))) union.set(String(channel?.id), channel);
+        // GLOBAL search: when the generated index ships its channel list,
+        // the query matches EVERY Magis channel — all 38 categories, loaded
+        // or not — instead of only the per-category caches warmed this
+        // session. Rows render with the owning category's name, and Enter
+        // resolves by channel code (per channel, no category load needed).
+        const indexChannels = searchChannelsFromIndex(this.catalogIndex);
+        if (!indexChannels.length) {
+          // FALLBACK (index missing or stale — no channels list): today's
+          // behaviour, the deduplicated union of every cached per-category
+          // list.
+          const union = new Map();
+          for (const list of caches.values()) {
+            for (const channel of Array.isArray(list) ? list : []) {
+              if (!union.has(String(channel?.id))) union.set(String(channel?.id), channel);
+            }
           }
+          this.channels = Array.from(union.values()).filter((channel) => internals.channelMatchesQuery(channel, this.searchQuery));
+        } else {
+          const matches = indexChannels.filter((channel) => internals.channelMatchesQuery(channel, this.searchQuery));
+          // PremiumTV channels are not part of the Magis index: their cached
+          // lists stay searchable, otherwise a loaded PremiumTV channel would
+          // vanish from search the moment the Magis index ships.
+          const premium = new Map();
+          for (const [columnId, list] of caches) {
+            if (!String(columnId).startsWith("premiumtv:")) continue;
+            for (const channel of Array.isArray(list) ? list : []) {
+              const id = String(channel?.id ?? "");
+              if (id && !premium.has(id)) premium.set(id, channel);
+            }
+          }
+          this.channels = matches.concat(
+            Array.from(premium.values()).filter((channel) => internals.channelMatchesQuery(channel, this.searchQuery))
+          );
         }
-        this.channels = Array.from(union.values()).filter((channel) => internals.channelMatchesQuery(channel, this.searchQuery));
       } else {
         const selection = String(this.railSelection ?? "");
         if (selection === internals.RAIL_FAVORITES_ID) {

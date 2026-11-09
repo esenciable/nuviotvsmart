@@ -26,6 +26,7 @@ import {
   RAIL_RECENTS_ID,
   categoryRailId,
   buildRailItems,
+  searchChannelsFromIndex,
   collapsedSourceIdsRef,
   isSourceExpanded,
   toggleSourceCollapsed,
@@ -748,6 +749,121 @@ describe("on-screen search keyboard (no system IME, no <input>)", () => {
 describe("search text normalization", () => {
   test("strips accents and case", () => {
     assert.equal(normalizeSearchText("  Televisión Española "), "television espanola");
+  });
+});
+
+describe("searchChannelsFromIndex (global search over every shipped channel)", () => {
+  // A generated index WITH the channels list: espn owned by Deportes (42),
+  // telecinco only in the generic catalogue (7).
+  const SEARCH_INDEX = {
+    generatedAt: "2026-02-11T00:00:00.000Z",
+    genericCategoryName: "ChannelList",
+    categories: [
+      { columnId: 42, name: "Deportes", count: 1 },
+      { columnId: 7, name: "ChannelList", count: 1 }
+    ],
+    channels: [
+      { code: "espn", name: "ESPN", number: 1, owner: "42" },
+      { code: "telecinco", name: "Telecinco", number: null, owner: "7" }
+    ],
+    leftovers: []
+  };
+
+  test("maps every index channel to a magis:live row carrying its owning category's name", () => {
+    const channels = searchChannelsFromIndex(SEARCH_INDEX);
+    assert.deepEqual(
+      channels.map((channel) => [channel.id, channel.code, channel.name, channel.number]),
+      [
+        ["magis:live:espn", "espn", "ESPN", 1],
+        ["magis:live:telecinco", "telecinco", "Telecinco", null]
+      ]
+    );
+    assert.equal(channels[0].ownerName, "Deportes"); // the row's meta line
+    assert.equal(channels[1].ownerName, "ChannelList");
+  });
+
+  test("matching stays case- and accent-insensitive over the channel name", () => {
+    const channels = searchChannelsFromIndex({
+      ...SEARCH_INDEX,
+      channels: [{ code: "tves", name: "Televisión Española", number: 1, owner: "7" }]
+    });
+    assert.equal(channels.length, 1);
+    assert.equal(channelMatchesQuery(channels[0], "TELEVISION"), true);
+    assert.equal(channelMatchesQuery(channels[0], "española"), true);
+    assert.equal(channelMatchesQuery(channels[0], "antena"), false);
+  });
+
+  test("a stale index (no channels list) and an unusable index yield NO rows — the screen falls back to the caches", () => {
+    assert.deepEqual(searchChannelsFromIndex({ ...SEARCH_INDEX, channels: undefined }), []);
+    assert.deepEqual(searchChannelsFromIndex({ ...SEARCH_INDEX, channels: [] }), []);
+    assert.deepEqual(searchChannelsFromIndex(null), []);
+    assert.deepEqual(searchChannelsFromIndex({ generatedAt: null, genericCategoryName: "ChannelList", categories: [], channels: [] }), []);
+  });
+
+  test("malformed entries are skipped and duplicate codes collapse into one row", () => {
+    const channels = searchChannelsFromIndex({
+      ...SEARCH_INDEX,
+      channels: [null, { code: "", name: "no code", owner: "7" }, { code: "espn", name: "ESPN dup", number: 9, owner: "7" }, { code: "espn", name: "ESPN", number: 1, owner: "42" }, { code: "ok", name: "  ", owner: "999" }]
+    });
+    assert.deepEqual(
+      channels.map((channel) => [channel.code, channel.name, channel.ownerName]),
+      [
+        ["espn", "ESPN dup", "ChannelList"], // the FIRST occurrence wins (same convention as leftovers)
+        ["ok", "Canal en vivo", ""] // unknown owner: no fake category name
+      ]
+    );
+  });
+});
+
+describe("global search wiring (source contract)", () => {
+  const renderSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-02-render.js", import.meta.url),
+    "utf8"
+  );
+  const tuneSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-03-tune-in.js", import.meta.url),
+    "utf8"
+  );
+  const mountSource = readFileSync(
+    new URL("../js/ui/screens/live/liveScreenMethods-01-mount-and-load.js", import.meta.url),
+    "utf8"
+  );
+
+  const refreshBody = () => {
+    const start = mountSource.indexOf("refreshVisibleChannels()");
+    const end = mountSource.indexOf("selectRailItem(", start);
+    return mountSource.slice(start, end);
+  };
+
+  test("the search branch matches the INDEX channels first — a category never loaded is still findable", () => {
+    const body = refreshBody();
+    const searchStart = body.indexOf("if (query)");
+    const searchEnd = body.indexOf("} else {", searchStart);
+    const searchBranch = body.slice(searchStart, searchEnd);
+    assert.match(searchBranch, /searchChannelsFromIndex\(this\.catalogIndex\)/);
+    assert.match(searchBranch, /channelMatchesQuery/);
+  });
+
+  test("while the index is missing or unusable, the fallback still searches the loaded cache union", () => {
+    const body = refreshBody();
+    const searchStart = body.indexOf("if (query)");
+    const searchEnd = body.indexOf("} else {", searchStart);
+    const searchBranch = body.slice(searchStart, searchEnd);
+    // The gate: no index rows -> the deduplicated union of the caches.
+    assert.match(searchBranch, /indexChannels\.length/);
+    assert.match(searchBranch, /union/);
+  });
+
+  test("a result row shows the owning category name (ownerName wins over the source label)", () => {
+    const start = renderSource.indexOf("renderChannelRowInner(channel)");
+    const end = renderSource.indexOf("fillChannelRowNode", start);
+    const rowBody = renderSource.slice(start, end);
+    assert.match(rowBody, /channel\?\.ownerName \|\| sourceNameFromChannelId/);
+  });
+
+  test("Enter still resolves by channel code: the row carries data-channel-id and tuneIn resolves it — no category load", () => {
+    assert.match(renderSource, /data-channel-id/);
+    assert.match(tuneSource, /resolveChannel\(channelId/);
   });
 });
 
