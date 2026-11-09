@@ -6,6 +6,8 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
+import { createLiveScreenMethods01 } from "../js/ui/screens/live/liveScreenMethods-01-mount-and-load.js";
+
 import {
   sourceNameFromChannelId,
   sourceNameFromColumnId,
@@ -945,5 +947,98 @@ describe("virtualized channel list (only a window of rows exists in the DOM)", (
     assert.match(row, /height:\s*51px/);
     const list = ruleBody(".live-channel-list");
     assert.match(list, /gap:\s*6px/);
+  });
+});
+
+// Both sources answer the search at once. PremiumTV ships one persisted
+// playlist for the whole source, so a group's channels are a free in-memory
+// filter: warming them at mount is what stops the global search from silently
+// covering only Magis.
+describe("live search covers Magis and PremiumTV at the same time", () => {
+  const magisIndex = {
+    generatedAt: "2026-11-09T00:00:00.000Z",
+    genericCategoryName: "Catálogo genérico",
+    categories: [
+      { columnId: "76182", name: "Películas", count: 1 },
+      { columnId: "premiumtv:TCS", name: "TCS", count: 2 }
+    ],
+    channels: [{ code: "cyx_1", name: "Cine TCS", number: 25, owner: "76182" }],
+    leftovers: []
+  };
+
+  function screenWith(overrides = {}) {
+    const methods = createLiveScreenMethods01();
+    return Object.assign(Object.create(methods), {
+      loadToken: 1,
+      searchActive: true,
+      searchQuery: "",
+      catalogIndex: magisIndex,
+      channelsByColumn: new Map(),
+      categories: [
+        { columnId: "76182", name: "Películas" },
+        { columnId: "premiumtv:TCS", name: "TCS" },
+        { columnId: "premiumtv:Canal 4", name: "Canal 4" }
+      ],
+      ...overrides
+    });
+  }
+
+  test("warms every uncached PremiumTV group once and skips Magis folders", async () => {
+    const screen = screenWith();
+    const asked = [];
+    const warmed = await screen.warmPremiumCaches(async ({ columnId }) => {
+      asked.push(columnId);
+      return {
+        status: "success",
+        data: [{ id: `${columnId}:1`, name: "TCS Noticias", number: null }]
+      };
+    });
+
+    assert.equal(warmed, 2);
+    assert.deepEqual(asked, ["premiumtv:TCS", "premiumtv:Canal 4"]);
+    assert.equal(screen.channelsByColumn.get("premiumtv:TCS").length, 1);
+    assert.equal(screen.channelsByColumn.has("76182"), false, "a Magis folder is never preloaded");
+  });
+
+  test("a failing group never breaks the other source, and nothing is warmed twice", async () => {
+    const screen = screenWith();
+    screen.channelsByColumn.set("premiumtv:TCS", [{ id: "premiumtv:TCS:9", name: "ya estaba" }]);
+    const asked = [];
+    const warmed = await screen.warmPremiumCaches(async ({ columnId }) => {
+      asked.push(columnId);
+      if (columnId === "premiumtv:Canal 4") throw new Error("playlist caída");
+      return { status: "success", data: [] };
+    });
+
+    assert.deepEqual(asked, ["premiumtv:Canal 4"], "the cached group is not refetched");
+    assert.equal(warmed, 0);
+    assert.deepEqual(screen.channelsByColumn.get("premiumtv:TCS"), [{ id: "premiumtv:TCS:9", name: "ya estaba" }]);
+  });
+
+  test("search lists the Magis index channel and the warm PremiumTV channel together", async () => {
+    const screen = screenWith();
+    await screen.warmPremiumCaches(async () => ({
+      status: "success",
+      data: [
+        { id: "premiumtv:TCS:1", name: "TCS Deportes", number: null },
+        { id: "premiumtv:TCS:2", name: "Otra Cosa", number: null }
+      ]
+    }));
+
+    screen.searchQuery = "tcs";
+    screen.refreshVisibleChannels();
+    const names = screen.channels.map((channel) => channel.name);
+
+    assert.deepEqual(names.sort(), ["Cine TCS", "TCS Deportes"], "both sources answer one query");
+    assert.equal(screen.channels[0].id, "magis:live:cyx_1", "Magis stays first");
+  });
+
+  test("mount warms PremiumTV without a category being opened", () => {
+    const mount = readFileSync(
+      new URL("../js/ui/screens/live/liveScreenMethods-01-mount-and-load.js", import.meta.url),
+      "utf8"
+    );
+    assert.match(mount, /void this\.warmPremiumCaches\(\)/, "mount must trigger the warm-up");
+    assert.match(mount, /PREMIUMTV_CHANNEL_ID_PREFIX/, "the source prefix is imported, not hardcoded");
   });
 });

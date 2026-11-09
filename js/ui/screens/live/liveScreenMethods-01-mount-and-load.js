@@ -1,6 +1,7 @@
 /* eslint-disable no-unused-vars */
 import * as internals from "./liveScreen.js";
 import { searchChannelsFromIndex } from "./liveScreenMethods-02-render.js";
+import { PREMIUMTV_CHANNEL_ID_PREFIX } from "../../../core/live/premiumTvSource.js";
 
 function clampRowIndexValue(index, length) {
   const max = Math.max(0, (Array.isArray(length) ? length.length : Number(length) || 0) - 1);
@@ -208,6 +209,9 @@ export function createLiveScreenMethods01() {
           }
         }
       }
+      // Both sources answer the search from here on: Magis from the index,
+      // PremiumTV from these warmed (free) group lists.
+      void this.warmPremiumCaches();
     },
 
     // Applies the generated Magis catalog index: per-category rail counts
@@ -289,6 +293,39 @@ export function createLiveScreenMethods01() {
         this.channels = result.data;
       }
       this.refreshVisibleChannels();
+    },
+
+    // PremiumTV ships ONE playlist for the whole source (persisted, up to 3000
+    // entries), so a group's channels are an in-memory filter over that list,
+    // never a download. Warming every group here costs no network and is what
+    // lets the GLOBAL search answer from both sources at once, instead of only
+    // the folders the user happened to open this session.
+    async warmPremiumCaches(loadChannels = null) {
+      if (!(this.channelsByColumn instanceof Map)) return 0;
+      const token = this.loadToken;
+      const list = Array.isArray(this.categories) ? this.categories : [];
+      const pending = list
+        .map((entry) => String(entry?.columnId ?? ""))
+        .filter((id) => id.startsWith(PREMIUMTV_CHANNEL_ID_PREFIX) && !this.channelsByColumn.has(id));
+      if (!pending.length) return 0;
+      const load = typeof loadChannels === "function" ? loadChannels : (args) => liveRepository.listChannels(args);
+      let warmed = 0;
+      for (const columnId of pending) {
+        if (token !== this.loadToken) return warmed;
+        try {
+          const result = await load({ columnId });
+          if (result?.status !== "success") continue;
+          this.channelsByColumn.set(columnId, Array.isArray(result.data) ? result.data : []);
+          warmed += 1;
+        } catch (_) {
+          // A failing PremiumTV group never breaks Magis nor the search: the
+          // source keeps whatever the cache already holds.
+        }
+      }
+      if (warmed && this.searchActive && String(this.searchQuery || "").trim()) {
+        this.refreshVisibleChannels();
+      }
+      return warmed;
     },
 
     // Recomputes this.channels from the current rail selection / search state
