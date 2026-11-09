@@ -2,6 +2,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { readFile, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { buildRuntimeEnvScript, readEnvProperties } from "./envProperties.mjs";
@@ -9,6 +10,11 @@ import { buildRuntimeEnvScript, readEnvProperties } from "./envProperties.mjs";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const distDir = path.join(rootDir, "dist");
+// --vidaa serves the tree `npm run package:vidaa` produces (its own entry,
+// manifest and service worker). Serving the Tizen tree and telling the user to
+// open `?wrapper=vidaa` was the old behaviour, and it never tested VIDAA.
+const isVidaa = process.argv.includes("--vidaa");
+const servedDistDir = isVidaa ? path.join(distDir, "vidaa") : distDir;
 const host = process.env.HOST || "0.0.0.0";
 const port = Number(process.env.PORT || 4173);
 const mediaRuntimePath = path.join(rootDir, "services", "webos", "runtime", "media-http.cjs");
@@ -68,7 +74,7 @@ function resolveDistPathForRootFile(rootFilePath) {
   if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
     return "";
   }
-  return path.join(distDir, relativePath);
+  return path.join(servedDistDir, relativePath);
 }
 
 async function resolveRequestFile(pathname) {
@@ -237,10 +243,17 @@ const server = http.createServer(async (request, response) => {
 
 await ensureLocalMediaRuntime();
 
+if (isVidaa && !existsSync(path.join(servedDistDir, "index.html"))) {
+  console.error(
+    `serve: ${servedDistDir}/index.html is missing. Run \`npm run package:vidaa\` first.`
+  );
+  process.exit(1);
+}
+
 server.listen(port, host, async () => {
   const localHost = host === "0.0.0.0" ? "127.0.0.1" : host;
   const mediaPort = await findLocalMediaServerPort();
-  console.log(`Serving Nuvio TV from ${rootDir}`);
+  console.log(`Serving Nuvio TV from ${servedDistDir}`);
   console.log(`Local URL: http://${localHost}:${port}/`);
   for (const lanUrl of getLanUrls()) {
     console.log(`LAN URL: ${lanUrl}`);
@@ -250,7 +263,6 @@ server.listen(port, host, async () => {
       ? `Local media tracks endpoint: http://${localHost}:${port}/tracks/<media-url> -> 127.0.0.1:${mediaPort}`
       : "Local media tracks endpoint unavailable. Install/enable the media runtime to inspect internal tracks."
   );
-  const isVidaa = process.argv.includes("--vidaa");
   if (isVidaa) {
     console.log("\n=======================================================");
     console.log("  Nuvio TV - VIDAA OS Testing Server Ready!");
