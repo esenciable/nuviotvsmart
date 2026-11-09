@@ -5,7 +5,13 @@ import * as internals from "./sportsScreen.js";
 // entry, on Actualizar and when the day changes — and NOWHERE else: there is
 // no polling loop, no interval, no background timer. The feed's own 60 s TTL
 // keeps the repeat fetches (entry, day change) from hitting the network.
+//
+// ESPN live scores add ONE bounded round per 60 s: a CHAINED setTimeout (no
+// repeating interval primitive anywhere) that only runs while the screen is
+// mounted AND document.visibilityState === "visible" — armed on mount, stopped
+// on unmount and on hide (restarted on show, which also scores immediately).
 import { groupEventsByDay } from "../../../core/sports/sportsFeed.js";
+import { scoresForDay } from "../../../core/sports/espnScores.js";
 
 export function createSportsScreenMethods01() {
   const { Router, ScreenUtils, sportsRepository, buildSections, sportChips } = internals;
@@ -42,7 +48,22 @@ export function createSportsScreenMethods01() {
       this.notice = "";
       this.noticeTimer = 0;
 
+      // ESPN scores state: the visible day's games (merged per row by
+      // buildMatchRows) and the visible-only 60 s round timer.
+      this.scores = [];
+      this.scoresToken = 0;
+      this.scoresTimer = 0;
+      this.onScoresVisibility = null;
+
       this.render({ preserveFocus: false });
+
+      // The 60 s scored round exists ONLY while the screen is mounted and the
+      // document is visible; visibility changes re-arm or stop it.
+      if (typeof document !== "undefined") {
+        this.onScoresVisibility = () => this.handleScoresVisibilityChange();
+        document.addEventListener("visibilitychange", this.onScoresVisibility);
+      }
+      this.startScoresTimer();
 
       // Entry refresh: the repository's TTL decides whether this is a network
       // call or a warm cache hit.
@@ -78,6 +99,9 @@ export function createSportsScreenMethods01() {
       this.events = Array.isArray(result.events) ? result.events : [];
       this.rebuildDerivedState();
       this.render({ preserveFocus: false });
+      // Scores for the visible day ride the SAME load path (entry, Actualizar
+      // and day change) — one bounded round, cached 60 s in espnScores.
+      void this.loadScores({});
     },
 
     // Recomputes everything derived from the raw events: the sport chips (the
@@ -101,6 +125,8 @@ export function createSportsScreenMethods01() {
 
     // Day chip: recompute sections from the CURRENT events first (instant
     // paint), then refresh per the owner rule (TTL decides network vs cache).
+    // The old day's scores are dropped immediately: an in-flight round for the
+    // previous day must never paint onto the new day's rows.
     changeDay(dayKey) {
       const next = String(dayKey || "");
       if (!next || next === this.dayKey) return;
@@ -108,6 +134,8 @@ export function createSportsScreenMethods01() {
       this.finishedExpanded = false;
       this.focusZone = "header";
       this.rowIndex = 0;
+      this.scores = [];
+      this.scoresToken = (this.scoresToken || 0) + 1;
       this.rebuildDerivedState();
       this.render({ preserveFocus: false });
       return this.loadEvents({ force: false });
@@ -124,10 +152,57 @@ export function createSportsScreenMethods01() {
     },
 
     clampRowIndex() {
-      const rows = internals.buildMatchRows(this.sections, this.finishedExpanded);
+      const rows = internals.buildMatchRows(this.sections, this.finishedExpanded, this.scores);
       const max = Math.max(0, rows.length - 1);
       if (this.rowIndex > max) this.rowIndex = max;
       if (this.rowIndex < 0) this.rowIndex = 0;
+    },
+
+    // ESPN scores for the visible day: ONE bounded round (8 slugs max, 1200 ms
+    // per request, 60 s TTL cache in espnScores). Never throws; the token
+    // keeps a stale day's round from painting over a newer one.
+    async loadScores({ token = null } = {}) {
+      const myToken = token == null ? (this.scoresToken = (this.scoresToken || 0) + 1) : token;
+      const events = Array.isArray(this.events) ? this.events : [];
+      if (!events.length) return;
+      const result = await scoresForDay({ dayKey: this.dayKey, events });
+      if (myToken !== this.scoresToken || Router.getCurrent() !== "sports") {
+        return; // the screen or the day moved on; render nothing new
+      }
+      this.scores = Array.isArray(result?.games) ? result.games : [];
+      this.render({ preserveFocus: true });
+    },
+
+    // The 60 s scored round: armed ONLY while mounted AND visible. A chained
+    // setTimeout (no repeating interval primitive); stopScoresTimer clears it
+    // on unmount and on hide.
+    startScoresTimer() {
+      this.stopScoresTimer();
+      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+      this.scoresTimer = setTimeout(() => {
+        this.scoresTimer = 0;
+        if (Router.getCurrent() !== "sports") return;
+        void this.loadScores({});
+        this.startScoresTimer();
+      }, internals.SPORTS_SCORES_REFRESH_MS);
+    },
+
+    stopScoresTimer() {
+      if (this.scoresTimer) {
+        clearTimeout(this.scoresTimer);
+        this.scoresTimer = 0;
+      }
+    },
+
+    // Hidden: stop the round. Visible again: restart it AND score now, so a
+    // TV that slept never shows minutes-old scores when it wakes.
+    handleScoresVisibilityChange() {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        this.startScoresTimer();
+        void this.loadScores({});
+      } else {
+        this.stopScoresTimer();
+      }
     },
 
     cleanup() {
@@ -136,6 +211,15 @@ export function createSportsScreenMethods01() {
       this.resolvingId = "";
       this.clearNoticeTimer();
       this.notice = "";
+      // The scored round dies with the screen: timer stopped, listener
+      // removed, in-flight round invalidated.
+      this.scoresToken = (this.scoresToken || 0) + 1;
+      this.stopScoresTimer();
+      if (this.onScoresVisibility && typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", this.onScoresVisibility);
+      }
+      this.onScoresVisibility = null;
+      this.scores = [];
       ScreenUtils.hide(this.container);
     }
   };

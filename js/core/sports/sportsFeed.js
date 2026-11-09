@@ -220,9 +220,12 @@ export function formatKickoffTime(kickoffMs) {
 // gets ONE bounded request (≤6 s):
 //   - a playlist URL (m3u8/m3u) must answer 2xx with a body starting #EXTM3U;
 //   - any non-playlist URL only needs a 2xx.
-// Streams are tried in order; the first that answers wins; if none answers the
-// caller must NOT navigate. One attempt per stream, no retries, and the probe
-// only ever runs from an explicit Enter on a match.
+// The candidates are probed CONCURRENTLY (one request each, no retries) so a
+// match with several links never pays several timeouts in series, and EVERY
+// stream that answers is returned — in the addon's original order — so the
+// screen can offer them all instead of silently playing the first. If none
+// answers the caller must NOT navigate. The probe only ever runs from an
+// explicit Enter on a match.
 export const SPORTS_PROBE_TIMEOUT_MS = 6000;
 
 // A URL that claims to be an HLS/media playlist must prove it with #EXTM3U.
@@ -230,10 +233,12 @@ export function looksLikePlaylistUrl(url) {
   return /\.m3u8?\b/i.test(String(url || ""));
 }
 
-// The ordered candidate URLs from a resolveStreams result (garbage dropped).
+// The candidate stream objects with a usable url (garbage dropped, addon
+// order kept). `verified`/`name`/`resolution` travel untouched so the picker
+// can label each playable source exactly as the addon declared it.
 function probeCandidates(streams) {
   return (Array.isArray(streams) ? streams : [])
-    .map((stream) => (stream && String(stream.url ?? "").trim() ? String(stream.url).trim() : ""))
+    .map((stream) => (stream && String(stream.url ?? "").trim() ? stream : null))
     .filter(Boolean);
 }
 
@@ -268,11 +273,13 @@ async function probeUrlOnce(fetchFn, url, timeoutMs) {
   }
 }
 
-// Try the resolved streams in order; the first that answers wins.
-//   { url, tried, total }  — url is null when NO stream answered (no handoff).
-// Same default-fetch arming as createSportsFeed: in node --test without an
-// injected fetch this probes nothing and never touches the network.
-export async function pickPlayableStream(
+// Probe EVERY resolved stream concurrently (one bounded attempt each, no
+// retries) and return all that answer, in the addon's original order:
+//   { playable: [stream, ...], tried, total }
+// `playable` is empty when NO stream answered (no handoff). Same default-fetch
+// arming as createSportsFeed: in node --test without an injected fetch this
+// probes nothing and never touches the network.
+export async function probePlayableStreams(
   streams,
   { fetchImpl = null, timeoutMs = SPORTS_PROBE_TIMEOUT_MS } = {}
 ) {
@@ -281,16 +288,20 @@ export async function pickPlayableStream(
     fetchImpl ||
     (typeof window !== "undefined" && typeof fetch === "function" ? fetch.bind(globalThis) : null);
   if (!candidates.length || !fetchFn) {
-    return { url: null, tried: 0, total: candidates.length };
+    return { playable: [], tried: 0, total: candidates.length };
   }
-  let tried = 0;
-  for (const url of candidates) {
-    tried += 1;
-    if (await probeUrlOnce(fetchFn, url, timeoutMs)) {
-      return { url, tried, total: candidates.length };
-    }
-  }
-  return { url: null, tried, total: candidates.length };
+  // All probes in flight at once; each one bounded by probeUrlOnce. The
+  // verdicts keep the candidates' order, so `playable` is stable.
+  const verdicts = await Promise.all(
+    candidates.map(async (stream) =>
+      (await probeUrlOnce(fetchFn, String(stream.url).trim(), timeoutMs)) ? stream : null
+    )
+  );
+  return {
+    playable: verdicts.filter(Boolean),
+    tried: candidates.length,
+    total: candidates.length
+  };
 }
 
 // Feed instance --------------------------------------------------------------

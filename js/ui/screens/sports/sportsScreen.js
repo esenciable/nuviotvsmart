@@ -37,6 +37,7 @@ export {
   SPORTS_LOAD_ERROR_TEXT,
   SPORTS_NO_SIGNAL_TEXT,
   SPORTS_RESOLVING_TEXT,
+  SPORTS_SCORES_REFRESH_MS,
   pendingNoticeText,
   matchRowTitle,
   matchRowScore,

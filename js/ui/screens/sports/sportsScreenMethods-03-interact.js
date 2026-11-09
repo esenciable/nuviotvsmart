@@ -4,7 +4,7 @@ import * as internals from "./sportsScreen.js";
 // real browser/TV context" rule) and the probe-failure copy in the render
 // module; both are imported directly because sportsScreen.js re-exports only
 // the helpers the original layout contract pinned.
-import { pickPlayableStream } from "../../../core/sports/sportsFeed.js";
+import { probePlayableStreams } from "../../../core/sports/sportsFeed.js";
 import { probeFailedNoticeText } from "./sportsScreenMethods-02-render.js";
 
 // Key handling, activation and stream resolution for the Sports screen.
@@ -21,10 +21,25 @@ export function createSportsScreenMethods03() {
   return {
     onKeyDown(event) {
       try {
-        const code = Number(event?.keyCode || 0);
         if (isBackEvent(event)) {
           event?.preventDefault?.();
+          if (this.sourcePicker) {
+            this.closeSourcePicker();
+            return;
+          }
           Router.back();
+          return;
+        }
+        const code = Number(event?.keyCode || 0);
+        if (this.sourcePicker) {
+          // The picker owns the keys while it is open: Up/Down move the
+          // highlight, Enter plays it, everything else is ignored. No player
+          // navigation can happen from the picker without Enter.
+          if (code === 13) {
+            this.playPickedSource();
+          } else if (code === 38 || code === 40) {
+            this.movePickerIndex(code === 38 ? -1 : 1);
+          }
           return;
         }
         if (code === 37 || code === 39) {
@@ -69,7 +84,7 @@ export function createSportsScreenMethods03() {
         if (nextRow < 0) return; // UP at the top row stays put
         if (nextRow >= this.headerRowCount()) {
           // DOWN from the last header row enters the list.
-          const rows = internals.buildMatchRows(this.sections, this.finishedExpanded);
+          const rows = internals.buildMatchRows(this.sections, this.finishedExpanded, this.scores);
           if (!rows.length) return;
           this.focusZone = "rows";
           this.clampRowIndex();
@@ -82,7 +97,7 @@ export function createSportsScreenMethods03() {
       }
       // Rows zone: one row per keypress. UP past the first row returns to the
       // header (the sport chips row when present, otherwise the day row).
-      const rows = internals.buildMatchRows(this.sections, this.finishedExpanded);
+      const rows = internals.buildMatchRows(this.sections, this.finishedExpanded, this.scores);
       if (!rows.length) return;
       if (delta < 0 && (this.rowIndex || 0) <= 0) {
         this.focusZone = "header";
@@ -114,7 +129,7 @@ export function createSportsScreenMethods03() {
         }
         return;
       }
-      const rows = internals.buildMatchRows(this.sections, this.finishedExpanded);
+      const rows = internals.buildMatchRows(this.sections, this.finishedExpanded, this.scores);
       const row = rows[this.rowIndex || 0];
       if (!row) return;
       if (row.type === "header") {
@@ -174,34 +189,90 @@ export function createSportsScreenMethods03() {
       }
       // PROBE BEFORE HAND-OFF: the addon's URLs are unverified and were
       // measured 404 — handing one to the player is the black screen the owner
-      // reported. Each candidate gets one bounded request; the first that
-      // answers is the one the player gets. If none answers: no navigation,
+      // reported. Each candidate gets ONE bounded request, all of them
+      // CONCURRENTLY, so a match with several links does not pay several
+      // timeouts in series. EVERY stream that answers is kept; the first
+      // answer no longer silently wins. If none answers: no navigation,
       // honest notice with the count tried, row stays focused for a retry.
       this.showNotice(internals.SPORTS_RESOLVING_TEXT, { sticky: true });
-      const probe = await pickPlayableStream(candidates);
+      const probe = await probePlayableStreams(candidates);
       this.clearNotice();
       if (Router.getCurrent() !== "sports") {
         return; // the screen was left while probing
       }
-      if (!probe.url) {
+      if (!probe.playable.length) {
         this.showNotice(probeFailedNoticeText(probe.tried));
         return;
       }
-      // Live HLS: the player's existing live engine ladder handles the stream.
+      if (probe.playable.length === 1) {
+        // The usual case: play it directly, no extra step.
+        this.playStreamUrl(probe.playable[0], event);
+        return;
+      }
+      // Several playable sources: offer them all in the picker.
+      this.openSourcePicker(probe.playable, event);
+    },
+
+    // The single player hand-off (live HLS: the player's existing live engine
+    // ladder handles the stream). Used by the direct path AND the picker.
+    playStreamUrl(stream, event) {
+      const url = String(stream?.url ?? "").trim();
+      if (!url) return;
       Router.navigate("player", {
-        streamUrl: probe.url,
+        streamUrl: url,
         itemType: "channel",
         playerTitle: internals.matchRowTitle(event),
         returnRoute: "sports",
         streamCandidates: [
           {
-            url: probe.url,
+            url,
             behaviorHints: {
               proxyHeaders: { request: {} }
             }
           }
         ]
       });
+    },
+
+    // The source picker: a fixed panel over the list, one row per playable
+    // source, the addon's original order. An explicit Enter action, so a
+    // render is allowed (same as toggleFinished).
+    openSourcePicker(streams, event) {
+      this.sourcePicker = {
+        streams: Array.isArray(streams) ? streams : [],
+        index: 0,
+        event: event || null
+      };
+      this.render();
+    },
+
+    // Back on the picker closes it (it never leaves the screen) and the
+    // previous focus state — the same match row, still selected — returns.
+    closeSourcePicker() {
+      if (!this.sourcePicker) return;
+      this.sourcePicker = null;
+      this.render();
+    },
+
+    movePickerIndex(delta) {
+      const picker = this.sourcePicker;
+      if (!picker) return;
+      const count = Array.isArray(picker.streams) ? picker.streams.length : 0;
+      if (!count) return;
+      const next = Math.min(Math.max((picker.index || 0) + delta, 0), count - 1);
+      if (next === picker.index) return;
+      picker.index = next;
+      this.applyFocusState();
+    },
+
+    // Enter on the picker: play the highlighted source, close the picker.
+    playPickedSource() {
+      const picker = this.sourcePicker;
+      if (!picker) return;
+      const stream = (Array.isArray(picker.streams) ? picker.streams : [])[picker.index || 0];
+      if (!stream) return;
+      this.sourcePicker = null;
+      this.playStreamUrl(stream, picker.event);
     },
 
     // Inline notice, patched in place (like the Live TV screen): the list,

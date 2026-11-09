@@ -25,9 +25,12 @@ import {
   partitionEvents,
   buildSections,
   formatKickoffTime,
-  pickPlayableStream,
   createSportsFeed
 } from "../js/core/sports/sportsFeed.js";
+
+// The new concurrent probe is reached through the namespace so a missing
+// export fails exactly the tests that need it, not the whole file.
+import * as sportsFeedModule from "../js/core/sports/sportsFeed.js";
 
 import {
   createSportsRepository,
@@ -405,11 +408,15 @@ describe("resolveStreams: the real /stream/tv/<id>.json mapping, one attempt onl
 });
 
 // Probe: the addon marks its URLs `verified: false` and they were measured
-// 404. Before the player handoff every candidate gets ONE bounded request:
+// 404. Before the player handoff EVERY candidate gets ONE bounded request
+// (≤6 s) and they are probed CONCURRENTLY — a match with several links must
+// not pay several timeouts in series:
 //   - a playlist URL (m3u8/m3u) must answer 2xx with a body starting #EXTM3U;
 //   - any non-playlist URL only needs a 2xx.
-// Streams are tried in order; the first that answers wins; none -> no handoff.
-describe("probe: pickPlayableStream verifies the stream before the player handoff", () => {
+// EVERY stream that answers is returned, in the addon's original order; the
+// screen offers them all instead of silently playing the first. None -> no
+// handoff. One request per candidate, no retries.
+describe("probe: probePlayableStreams verifies EVERY stream before the player handoff", () => {
   const m3u8Response = (body = "#EXTM3U\n#EXT-X-VERSION:3") => ({
     ok: true,
     status: 200,
@@ -425,37 +432,76 @@ describe("probe: pickPlayableStream verifies the stream before the player handof
       if (typeof hit === "function") return hit();
       return hit;
     };
-    return { calls, run: (streams) => pickPlayableStream(streams, { fetchImpl, timeoutMs }) };
+    return { calls, run: (streams) => sportsFeedModule.probePlayableStreams(streams, { fetchImpl, timeoutMs }) };
   }
 
-  test("mixed list skips the dead one: the first 2xx #EXTM3U playlist wins", async () => {
+  test("returns EVERY stream that answers, in the addon's stable order, dead ones skipped", async () => {
     const dead = "https://dead.example/stream.m3u8";
-    const good = "https://esencialsport.attendanceos.app/rblive/playlist.m3u8?s=1";
-    const { calls, run } = probeWith({ [dead]: { ok: false, status: 404, text: async () => "" }, [good]: m3u8Response() });
-    const probe = await run([{ name: "a", url: dead }, { name: "b", url: good }]);
-    assert.equal(probe.url, good);
-    assert.equal(probe.tried, 2);
-    assert.equal(probe.total, 2);
-    assert.deepEqual(calls, [dead, good]);
-    assert.equal(calls.filter((u) => u === dead).length, 1, "one attempt per stream — no retries");
+    const a = "https://esencialsport.attendanceos.app/rblive/playlist.m3u8?s=1";
+    const b = "https://esencialsport.attendanceos.app/rblive/playlist.m3u8?s=2";
+    const { calls, run } = probeWith({
+      [dead]: { ok: false, status: 404, text: async () => "" },
+      [a]: m3u8Response(),
+      [b]: m3u8Response()
+    });
+    const streams = [
+      { name: "Esencial", url: dead, verified: false },
+      { name: "LaLiga HD", url: a, resolution: "1080p" },
+      { name: "Backup", url: b, resolution: "720p" }
+    ];
+    const probe = await run(streams);
+    assert.deepEqual(probe.playable.map((s) => s.url), [a, b], "dead skipped, order kept");
+    assert.equal(probe.playable[0].name, "LaLiga HD");
+    assert.equal(probe.playable[0].resolution, "1080p");
+    assert.equal(probe.playable[1].name, "Backup");
+    // The stream objects travel untouched so the picker can label them.
+    assert.equal(probe.playable[0].verified, undefined);
+    assert.equal(probe.tried, 3);
+    assert.equal(probe.total, 3);
+    assert.deepEqual(calls, [dead, a, b], "one request per candidate");
+    assert.equal(new Set(calls).size, calls.length, "no retries");
   });
 
-  test("all failing -> no navigation: url is null and every stream was tried once", async () => {
+  test("all failing -> playable is empty, every stream tried exactly once, no retries", async () => {
     const a = "https://a.example/s.m3u8";
     const b = "https://b.example/s.m3u8";
-    const { calls, run } = probeWith({ [a]: { ok: false, status: 404, text: async () => "" }, [b]: { ok: false, status: 500, text: async () => "" } });
+    const { calls, run } = probeWith({
+      [a]: { ok: false, status: 404, text: async () => "" },
+      [b]: { ok: false, status: 500, text: async () => "" }
+    });
     const probe = await run([{ url: a }, { url: b }]);
-    assert.equal(probe.url, null);
+    assert.deepEqual(probe.playable, []);
     assert.equal(probe.tried, 2);
+    assert.equal(probe.total, 2);
     assert.deepEqual(calls, [a, b]);
   });
 
-  test("a 200 playlist whose body does not start with #EXTM3U is dead; a later candidate wins", async () => {
+  test("probing is concurrent: candidates are in flight together, never one timeout after another", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const fetchImpl = async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      inFlight -= 1;
+      return m3u8Response();
+    };
+    const streams = [
+      { name: "a", url: "https://a.example/s.m3u8" },
+      { name: "b", url: "https://b.example/s.m3u8" },
+      { name: "c", url: "https://c.example/s.m3u8" }
+    ];
+    const probe = await sportsFeedModule.probePlayableStreams(streams, { fetchImpl, timeoutMs: 5000 });
+    assert.equal(probe.playable.length, 3);
+    assert.equal(maxInFlight, 3, "all three probes were in flight at the same time");
+  });
+
+  test("a 200 playlist whose body does not start with #EXTM3U is not playable", async () => {
     const html = "https://html.example/s.m3u8";
     const good = "https://good.example/s.m3u8";
     const { run } = probeWith({ [html]: m3u8Response("<html>not a playlist</html>"), [good]: m3u8Response() });
     const probe = await run([{ url: html }, { url: good }]);
-    assert.equal(probe.url, good);
+    assert.deepEqual(probe.playable.map((s) => s.url), [good]);
     assert.equal(probe.tried, 2);
   });
 
@@ -463,7 +509,7 @@ describe("probe: pickPlayableStream verifies the stream before the player handof
     const seg = "https://x.example/seg.ts";
     const { run } = probeWith({ [seg]: { ok: true, status: 200, text: async () => "" } });
     const probe = await run([{ url: seg }]);
-    assert.equal(probe.url, seg);
+    assert.deepEqual(probe.playable.map((s) => s.url), [seg]);
     assert.equal(probe.tried, 1);
   });
 
@@ -471,7 +517,7 @@ describe("probe: pickPlayableStream verifies the stream before the player handof
     const hung = "https://hang.example/s.m3u8";
     const { run } = probeWith({ [hung]: () => new Promise(() => {}) }, { timeoutMs: 20 });
     const probe = await run([{ url: hung }]);
-    assert.equal(probe.url, null);
+    assert.deepEqual(probe.playable, []);
     assert.equal(probe.tried, 1);
   });
 
@@ -479,7 +525,7 @@ describe("probe: pickPlayableStream verifies the stream before the player handof
     const bad = "https://throw.example/s.m3u8";
     const { calls, run } = probeWith({ [bad]: () => { throw new Error("boom"); } });
     const probe = await run([{ url: bad }]);
-    assert.equal(probe.url, null);
+    assert.deepEqual(probe.playable, []);
     assert.equal(probe.tried, 1);
     assert.equal(calls.length, 1);
   });
@@ -487,10 +533,16 @@ describe("probe: pickPlayableStream verifies the stream before the player handof
   test("candidates without a usable url are skipped without any request", async () => {
     const { calls, run } = probeWith({});
     const probe = await run([{ name: "no-url" }, { url: "   " }, null]);
-    assert.equal(probe.url, null);
+    assert.deepEqual(probe.playable, []);
     assert.equal(probe.tried, 0);
     assert.equal(probe.total, 0);
     assert.deepEqual(calls, []);
+  });
+
+  test("no injected fetch (node --test) probes nothing and never touches the network", async () => {
+    const probe = await sportsFeedModule.probePlayableStreams([{ url: "https://x.example/s.m3u8" }]);
+    assert.deepEqual(probe.playable, []);
+    assert.equal(probe.tried, 0);
   });
 });
 
