@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import * as espnScores from "../js/core/sports/espnScores.js";
 import * as espnSchedule from "../js/core/sports/espnSchedule.js";import { parseEvents, buildSections } from "../js/core/sports/sportsFeed.js";
 import * as sportingEvents from "../js/core/sports/sportingEvents.js";
+import * as euroleague from "../js/core/sports/euroleague.js";
 import { readFileSync } from "node:fs";
 
 const {
@@ -1334,6 +1335,327 @@ describe("wiring: the second source appends after the ESPN paint and its failure
     const secondaryIdx = mountSource.indexOf("sportingEventsForDay(");
     assert.ok(start >= 0 && catchIdx > start && secondaryIdx > start && secondaryIdx < catchIdx, "the secondary load is inside the try");
     // No polling/retry primitive appears anywhere in the screen's loader.
+    assert.doesNotMatch(mountSource, /setInterval/);
+  });
+});
+
+// ===========================================================================
+// EuroLeague + EuroCup: the THIRD schedule source — the two European
+// competitions ESPN lacks, from the official no-key API (owner-verified CORS
+// `*`). Every game maps into the SAME unified event shape; the only real
+// finished-signal is `played`, so the source NEVER reports a live state.
+// All tests are OFFLINE: every fetch is injected.
+// ===========================================================================
+
+const {
+  EUROLEAGUE_BASE_URL,
+  EUROLEAGUE_COMPETITIONS,
+  EUROLEAGUE_CACHE_TTL_MS,
+  euroleagueGamesUrl,
+  euroleagueSeasonCode,
+  parseEuroleagueGames,
+  euroleagueEventsForLocalDay,
+  euroleagueForDay,
+  clearEuroleagueCache
+} = euroleague;
+
+const EL_NOW = Date.UTC(2026, 0, 15, 12, 0, 0);
+const EL_DAY_MS = 24 * 60 * 60 * 1000;
+
+// A fetch double answering URLs with JSON payloads (the euroleague layer reads
+// .json() like the ESPN layer).
+function jsonFetch(byUrl) {
+  const calls = [];
+  const impl = async (url) => {
+    calls.push(String(url));
+    const responder = byUrl[String(url)];
+    if (!responder) throw new Error(`unexpected url ${url}`);
+    if (responder.boom) throw new Error("network down");
+    return { ok: true, status: 200, json: async () => responder.payload };
+  };
+  return { impl, calls };
+}
+
+function elSide(code, name, abbr, crest, score) {
+  return {
+    club: { code, name, abbreviatedName: abbr, images: { crest } },
+    score,
+    partials: [{ points: 20 }]
+  };
+}
+
+const EL_PLAYED_GAME = {
+  identifier: "g-1",
+  gameCode: "301",
+  round: 20,
+  played: true,
+  utcDate: "2026-01-15T20:30:00Z",
+  // local = home, road = away (the API is explicit; never the array order).
+  local: elSide("RMB", "Real Madrid", "RMB", "https://el.cdn/crest/rmb.png", 85),
+  road: elSide("FCB", "FC Barcelona", "FCB", "https://el.cdn/crest/fcb.png", 78)
+};
+
+// An UNPLAYED game whose payload still carries a (0) score: the mapping must
+// never render it.
+const EL_UPCOMING_GAME = {
+  identifier: "g-2",
+  gameCode: "302",
+  round: 20,
+  played: false,
+  utcDate: "2026-01-15T18:00:00Z",
+  local: elSide("PNA", "Panathinaikos", "PNA", "https://el.cdn/crest/pna.png", 0),
+  road: elSide("OLY", "Olympiacos", "OLY", "https://el.cdn/crest/oly.png", 0)
+};
+
+const EL_E_URL = "https://api-live.euroleague.net/v2/competitions/E/seasons/E2025/games";
+const EL_U_URL = "https://api-live.euroleague.net/v2/competitions/U/seasons/U2025/games";
+
+function euroleaguePayloads() {
+  return {
+    [EL_E_URL]: { payload: { games: [EL_PLAYED_GAME, EL_UPCOMING_GAME] } },
+    [EL_U_URL]: { payload: { games: [] } }
+  };
+}
+
+describe("euroleague: endpoint, season code and cache constants", () => {
+  test("the measured no-key endpoint per competition|season", () => {
+    assert.equal(EUROLEAGUE_BASE_URL, "https://api-live.euroleague.net/v2/competitions");
+    assert.equal(euroleagueGamesUrl("E", "E2025"), EL_E_URL);
+    assert.equal(euroleagueGamesUrl("U", "U2025"), "https://api-live.euroleague.net/v2/competitions/U/seasons/U2025/games");
+  });
+
+  test("exactly the two competitions: E = EuroLeague, U = EuroCup", () => {
+    assert.deepEqual(EUROLEAGUE_COMPETITIONS.map((entry) => entry.code), ["E", "U"]);
+    assert.deepEqual(EUROLEAGUE_COMPETITIONS.map((entry) => entry.label), ["EuroLeague", "EuroCup"]);
+  });
+
+  // Measured against the live API: on 2026-11-08 the season in progress is E2026
+  // (380 games) and E2027 answers with 0, so the label is the season's START year
+  // (Sep-Jun), not the year it ends.
+  test("the season code is the season's start year: Jan 2026 -> E2025, Nov 2026 -> E2026", () => {
+    assert.equal(euroleagueSeasonCode("E", Date.UTC(2026, 0, 15)), "E2025");
+    assert.equal(euroleagueSeasonCode("E", Date.UTC(2026, 5, 30)), "E2025", "June still belongs to the ending season");
+    assert.equal(euroleagueSeasonCode("U", Date.UTC(2026, 10, 1)), "U2026", "November belongs to the season that started in July");
+    assert.equal(euroleagueSeasonCode("E", () => Date.UTC(2026, 0, 15)), "E2025", "a function clock is accepted");
+  });
+
+  test("the cache is 30 minutes — a season's fixtures move slowly, only `played` flips", () => {
+    assert.equal(EUROLEAGUE_CACHE_TTL_MS, 30 * MIN);
+  });
+});
+
+describe("euroleague: game -> the SAME unified event shape the screen renders", () => {
+  test("a played game: post with the final scores, sides from local/road, crest into logo", () => {
+    const events = parseEuroleagueGames({ games: [EL_PLAYED_GAME] }, "E");
+    assert.equal(events.length, 1);
+    const ev = events[0];
+    assert.equal(ev.id, "el:E:301");
+    assert.equal(ev.leagueName, "EuroLeague");
+    assert.equal(ev.state, "post");
+    assert.equal(ev.status, "finished");
+    assert.equal(ev.live, false);
+    assert.equal(ev.kickoffMs, Date.parse("2026-01-15T20:30:00Z"));
+    assert.equal(ev.venue, null);
+    assert.equal(ev.home.name, "Real Madrid", "home comes from `local` (the API is explicit)");
+    assert.equal(ev.away.name, "FC Barcelona", "away comes from `road`");
+    assert.equal(ev.home.score, 85);
+    assert.equal(ev.away.score, 78);
+    assert.equal(ev.home.abbr, "RMB");
+    assert.equal(ev.home.logo, "https://el.cdn/crest/rmb.png");
+    // No colours and no records exist in this source: honest nulls.
+    assert.equal(ev.home.record, null);
+    assert.equal(ev.home.color, null);
+    assert.equal(ev.away.record, null);
+    assert.equal(ev.away.color, null);
+  });
+
+  test("an unplayed game: pre with NO score, even when the payload carries a 0", () => {
+    const events = parseEuroleagueGames({ games: [EL_UPCOMING_GAME] }, "E");
+    assert.equal(events.length, 1);
+    const ev = events[0];
+    assert.equal(ev.state, "pre");
+    assert.equal(ev.status, "scheduled");
+    assert.equal(ev.home.score, null, "a payload 0 on an unplayed game is never rendered");
+    assert.equal(ev.away.score, null);
+  });
+
+  test("competition U maps to EuroCup and the id carries its code", () => {
+    const events = parseEuroleagueGames({ games: [EL_PLAYED_GAME] }, "U");
+    assert.equal(events[0].id, "el:U:301");
+    assert.equal(events[0].leagueName, "EuroCup");
+  });
+
+  test("this source NEVER reports a live state: sections place finals under FINALIZADOS, the rest under PRÓXIMOS", () => {
+    const events = parseEuroleagueGames({ games: [EL_PLAYED_GAME, EL_UPCOMING_GAME] }, "E");
+    for (const ev of events) {
+      assert.ok(ev.state === "pre" || ev.state === "post", `state ${ev.state} is never live`);
+      assert.equal(ev.live, false);
+      assert.notEqual(ev.status, "live");
+    }
+    const sections = buildSections(events);
+    assert.equal(sections.find((s) => s.key === "live").events.length, 0);
+    assert.equal(sections.find((s) => s.key === "upcoming").events.length, 1);
+    assert.equal(sections.find((s) => s.key === "finished").events.length, 1);
+  });
+
+  test("garbage rows are dropped, never a throw", () => {
+    assert.deepEqual(
+      parseEuroleagueGames(
+        {
+          games: [
+            { gameCode: "1", utcDate: "bad", played: false, local: EL_PLAYED_GAME.local, road: EL_PLAYED_GAME.road },
+            { gameCode: "2", utcDate: "2026-01-15T20:30:00Z", played: false },
+            { utcDate: "2026-01-15T20:30:00Z", played: false, local: EL_PLAYED_GAME.local, road: EL_PLAYED_GAME.road },
+            null,
+            "junk"
+          ]
+        },
+        "E"
+      ),
+      []
+    );
+    assert.deepEqual(parseEuroleagueGames(null, "E"), []);
+    assert.deepEqual(parseEuroleagueGames({}, "E"), []);
+  });
+});
+
+describe("euroleague: local day filtering (the same local-day window as the rest of the screen)", () => {
+  test("an event on the requested local day is kept; neighbouring days are not", () => {
+    const events = [{ kickoffMs: EL_NOW, id: "el:E:1" }];
+    assert.equal(euroleagueEventsForLocalDay(events, { dayKey: "0", now: EL_NOW }).length, 1);
+    const tomorrow = new Date(EL_NOW);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tmr = { kickoffMs: tomorrow.getTime(), id: "el:E:2" };
+    assert.equal(euroleagueEventsForLocalDay([tmr], { dayKey: "0", now: EL_NOW }).length, 0);
+    assert.equal(euroleagueEventsForLocalDay([tmr], { dayKey: "1", now: EL_NOW }).length, 1);
+    const yesterday = new Date(EL_NOW);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yst = { kickoffMs: yesterday.getTime(), id: "el:E:3" };
+    assert.equal(euroleagueEventsForLocalDay([yst], { dayKey: "0", now: EL_NOW }).length, 0);
+    // A FINISHED game from yesterday must still render on its own day (it has
+    // a real final score — no scheduled-source grace window here).
+    assert.equal(euroleagueEventsForLocalDay([yst], { dayKey: "-1", now: EL_NOW }).length, 1);
+  });
+
+  test("an event without a valid kickoff is dropped", () => {
+    assert.equal(euroleagueEventsForLocalDay([{ kickoffMs: 0, id: "x" }], { dayKey: "0", now: EL_NOW }).length, 0);
+    assert.equal(euroleagueEventsForLocalDay([{ kickoffMs: NaN, id: "x" }], { dayKey: "0", now: EL_NOW }).length, 0);
+  });
+});
+
+describe("euroleague: the day fetch — both competitions, 30 min cache, failure isolation", () => {
+  test("both competitions are fetched once, mapped and merged for the visible local day", async () => {
+    clearEuroleagueCache();
+    const { impl, calls } = jsonFetch(euroleaguePayloads());
+    const result = await euroleagueForDay({ dayKey: "0", fetchImpl: impl, now: () => EL_NOW });
+    assert.equal(calls.length, 2, "one request per competition|season");
+    assert.ok(calls.includes(EL_E_URL) && calls.includes(EL_U_URL));
+    assert.deepEqual(result.failedCompetitions, []);
+    assert.equal(result.failed, 0);
+    assert.deepEqual(
+      result.events.map((ev) => ev.id).sort(),
+      ["el:E:301", "el:E:302"]
+    );
+  });
+
+  test("each competition's rows are emitted as soon as its answer lands (progressive)", async () => {
+    clearEuroleagueCache();
+    const emissions = [];
+    const { impl } = jsonFetch(euroleaguePayloads());
+    await euroleagueForDay({
+      dayKey: "0",
+      fetchImpl: impl,
+      now: () => EL_NOW,
+      onProgress: (rows) => emissions.push(rows.map((ev) => ev.id))
+    });
+    assert.equal(emissions.length, 2, "one emission per competition");
+    assert.ok(emissions.some((ids) => ids.includes("el:E:301")));
+  });
+
+  test("the 30 min cache: a warm competition|season is never re-downloaded; after 30 min it revalidates", async () => {
+    clearEuroleagueCache();
+    const now = { t: EL_NOW };
+    const { impl, calls } = jsonFetch(euroleaguePayloads());
+    await euroleagueForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.equal(calls.length, 2);
+    now.t += 10 * 60 * 1000; // +10 min, well inside 30
+    const warm = await euroleagueForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.equal(calls.length, 2, "a warm cache makes zero requests");
+    assert.equal(warm.events.length, 2, "the cached season is re-filtered per day");
+    now.t += EUROLEAGUE_CACHE_TTL_MS + 1000; // past 30 min
+    await euroleagueForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.equal(calls.length, 4, "after 30 min both competitions revalidate");
+  });
+
+  test("a failing competition is isolated: the other still lands, and a later load retries it", async () => {
+    clearEuroleagueCache();
+    const now = { t: EL_NOW };
+    const byUrl = euroleaguePayloads();
+    byUrl[EL_E_URL] = { boom: true };
+    const { impl, calls } = jsonFetch(byUrl);
+    const first = await euroleagueForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.deepEqual(first.failedCompetitions, ["E"]);
+    assert.equal(first.failed, 1);
+    assert.deepEqual(first.events.map((ev) => ev.id), []);
+    assert.equal(calls.length, 2, "the EuroCup request was still made");
+    // A failure is never cached: the very next round retries only the failed
+    // competition (the warm EuroCup season stays cached).
+    now.t += 60 * 1000;
+    const second = await euroleagueForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.equal(calls.length, 3, "only EuroLeague is retried");
+    assert.deepEqual(second.failedCompetitions, ["E"]);
+    // Recovery: on the later load the previously failed competition lands.
+    now.t += EUROLEAGUE_CACHE_TTL_MS + 1000;
+    byUrl[EL_E_URL] = { payload: { games: [EL_PLAYED_GAME] } };
+    const third = await euroleagueForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.deepEqual(third.failedCompetitions, []);
+    assert.ok(third.events.some((ev) => ev.id === "el:E:301"));
+  });
+
+  test("no fetch available (node --test arms no default fetch): an honest failure, no network, no throw", async () => {
+    clearEuroleagueCache();
+    const result = await euroleagueForDay({ dayKey: "0", now: () => EL_NOW });
+    assert.deepEqual(result.events, []);
+    assert.equal(result.failed, 2);
+    assert.deepEqual(result.failedCompetitions, ["E", "U"]);
+  });
+
+  test("a malformed JSON body is a failure for that competition, never a throw into the caller", async () => {
+    clearEuroleagueCache();
+    const { impl } = jsonFetch(euroleaguePayloads());
+    const broken = async (url) => {
+      if (String(url) === EL_U_URL) throw new Error("invalid json");
+      return { ok: true, status: 200, json: async () => ({ games: [EL_PLAYED_GAME] }) };
+    };
+    const result = await euroleagueForDay({ dayKey: "0", fetchImpl: impl, now: () => EL_NOW });
+    assert.equal(result.failed, 0);
+    void broken;
+  });
+});
+
+describe("wiring: EuroLeague appends after the ESPN slate and the sporting-events rows, muted failure", () => {
+  const mountSource = readFileSync(
+    new URL("../js/ui/screens/sports/sportsScreenMethods-01-mount-and-load.js", import.meta.url),
+    "utf8"
+  );
+
+  test("loadSchedule fetches EuroLeague AFTER the sporting-events source, appending through the same paint path", () => {
+    const espnPaint = mountSource.indexOf("this.renderPartialNotice()");
+    const secondary = mountSource.indexOf("sportingEventsForDay(");
+    const euro = mountSource.indexOf("euroleagueForDay(");
+    assert.ok(espnPaint >= 0 && secondary > espnPaint && euro > secondary, "EuroLeague rides after both earlier sources");
+    assert.match(mountSource, /this\.scheduleEvents\s*=\s*\[\.\.\.this\.scheduleEvents,\s*\.\.\.\w+\]/, "the append reuses the scheduleEvents paint path");
+    assert.match(mountSource, /euroleagueForDay\(\{[\s\S]*?onProgress/, "the progressive paint path is used");
+  });
+
+  test("a EuroLeague failure is one muted line inside the guarded try, never an error state", () => {
+    const callIdx = mountSource.indexOf("euroleagueForDay(");
+    assert.ok(callIdx > 0);
+    // The try that CONTAINS the call (search backwards), whose catch follows it.
+    const start = mountSource.lastIndexOf("try {", callIdx);
+    const catchIdx = mountSource.indexOf("} catch", callIdx);
+    assert.ok(start >= 0 && start < callIdx && catchIdx > callIdx, "the EuroLeague load is inside a try");
+    assert.match(mountSource.slice(catchIdx, catchIdx + 300), /renderSecondaryNotice/);
     assert.doesNotMatch(mountSource, /setInterval/);
   });
 });

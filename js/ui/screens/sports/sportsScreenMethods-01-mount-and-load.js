@@ -18,6 +18,8 @@ import * as internals from "./sportsScreen.js";
 // and on hide (restarted on show, which also re-scores immediately).
 import { espnScheduleForDay } from "../../../core/sports/espnSchedule.js";
 import { sportingEventsForDay } from "../../../core/sports/sportingEvents.js";
+import { euroleagueForDay } from "../../../core/sports/euroleague.js";
+import { acbForDay } from "../../../core/sports/acb.js";
 
 export function createSportsScreenMethods01() {
   const { Router, ScreenUtils, sportsRepository, buildSections } = internals;
@@ -146,6 +148,63 @@ export function createSportsScreenMethods01() {
         // Strictly additive: an unexpected failure in the secondary path
         // leaves the ESPN list exactly as painted, with one muted line.
         this.renderSecondaryNotice(["sporting-events.org"]);
+      }
+      // THIRD SCHEDULE SOURCE (EuroLeague official API, no key): the two
+      // European competitions ESPN lacks (E = EuroLeague, U = EuroCup) load
+      // AFTER the ESPN slate and the sporting-events rows. euroleagueForDay
+      // emits each competition's rows as its answer lands (progressive, same
+      // paint path as the ESPN round), already filtered to the visible local
+      // day; the season payload is cached 30 min per competition|season. A
+      // failing competition is ONE muted line — the list painted above is
+      // never touched, and no live state is ever invented for its games.
+      try {
+        const euro = await euroleagueForDay({
+          dayKey: this.dayKey,
+          force,
+          onProgress: (euroleagueRows) => {
+            if (!canPaint()) return; // the screen or the day moved on
+            if (!Array.isArray(euroleagueRows) || !euroleagueRows.length) return;
+            this.scheduleEvents = [...this.scheduleEvents, ...euroleagueRows];
+            this.rebuildDerivedState();
+            this.render({ preserveFocus: false });
+            this.renderPartialNotice();
+          }
+        });
+        if (!canPaint()) return; // the screen or the day moved on; render nothing new
+        if (Array.isArray(euro?.failedCompetitions) && euro.failedCompetitions.length) {
+          const labels = { E: "EuroLeague", U: "EuroCup" };
+          this.renderSecondaryNotice(euro.failedCompetitions.map((code) => labels[code] || code));
+        }
+      } catch (_) {
+        // Strictly additive: an unexpected failure leaves every row already
+        // painted exactly as it is, with one muted line.
+        this.renderSecondaryNotice(["api-live.euroleague.net"]);
+      }
+      // FOURTH SCHEDULE SOURCE (Liga Endesa / ACB): the Spanish league ESPN
+      // lacks, scraped from acb.com/es/liga/partidos — the Tizen/Android
+      // engines bypass CORS (the TV measures readable bodies from the
+      // CORS-less host), so the RSC page is pulled directly. It loads AFTER
+      // the ESPN slate, the sporting-events rows and the EuroLeague rows,
+      // appending through the SAME paint path guarded by canPaint(): the
+      // parsed round is cached 30 min, a body above 1 MB is skipped, and a
+      // failed or unparsable page is ONE muted line — the rows painted above
+      // are never touched, and no live state is ever invented for its games.
+      try {
+        const acb = await acbForDay({ dayKey: this.dayKey, force });
+        if (!canPaint()) return; // the screen or the day moved on; render nothing new
+        if (Array.isArray(acb?.events) && acb.events.length) {
+          this.scheduleEvents = [...this.scheduleEvents, ...acb.events];
+          this.rebuildDerivedState();
+          this.render({ preserveFocus: false });
+          this.renderPartialNotice();
+        }
+        if (Array.isArray(acb?.failedCompetitions) && acb.failedCompetitions.length) {
+          this.renderSecondaryNotice(acb.failedCompetitions);
+        }
+      } catch (_) {
+        // Strictly additive: an unexpected failure leaves every row already
+        // painted exactly as it is, with one muted line.
+        this.renderSecondaryNotice(["acb.com"]);
       }
     },
 
