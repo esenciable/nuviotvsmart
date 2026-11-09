@@ -18,18 +18,19 @@ import * as internals from "./sportsScreen.js";
 //
 // Styles are inlined because the screen ships without a dedicated stylesheet.
 
+import { buildDayWindow, DAY_WINDOW_RADIUS, formatKickoffDayLabel } from "../../../core/sports/espnScores.js";
+
 // Fixed geometry of a match card: 86dp = 129px tall + 8dp = 12px gap. The
 // constant is the layout contract — the card never grows with its content
 // (long team names clamp to one line inside the fixed bands).
 export const SPORTS_ROW_HEIGHT = 129;
 export const SPORTS_ROW_GAP = 12;
 
-// The three day chips, in fixed order. Default selection: Hoy.
-export const SPORTS_DAY_CHIPS = [
-  { id: "yesterday", label: "Ayer" },
-  { id: "today", label: "Hoy" },
-  { id: "tomorrow", label: "Mañana" }
-];
+// The 15-day chip window: 7 days back, today, 7 days forward. The chips are
+// built FRESH on every render (labels follow the real calendar — today is
+// always "Hoy"), so a TV left on overnight never shows stale labels.
+export const SPORTS_DAY_WINDOW_RADIUS = DAY_WINDOW_RADIUS;
+export { buildDayWindow };
 
 export const SPORTS_REFRESH_LABEL = "Actualizar";
 export const SPORTS_FILTER_PILL_LABEL = "Todos los eventos";
@@ -82,6 +83,22 @@ export function sourcePickerOptionLabel(stream, index = 0) {
   const name = String(stream?.name ?? "").trim() || String(stream?.title ?? "").trim() || `Señal ${ordinal}`;
   const resolution = String(stream?.resolution ?? "").trim();
   return [name, resolution, stream?.verified === false ? SPORTS_PICKER_UNVERIFIED_LABEL : ""].filter(Boolean).join(" · ");
+}
+
+// The scheduled card's footer line under the bands:
+//   "jue 12 nov · 19:30 · Stadion Ergilio Hato"
+// Day label (local), local kickoff time and the venue when ESPN provides one
+// (comp.venue.fullName); the venue degrades out gracefully when absent.
+// Only for matches that have NOT started — live and finished cards keep the
+// fixed geometry with no extra line.
+export function scheduleFooterText(event) {
+  if (String(event?.state ?? "") !== "pre") return "";
+  const ms = Number(event?.kickoffMs);
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const day = formatKickoffDayLabel(ms);
+  const time = internals.formatKickoffTime(ms);
+  const venue = String(event?.venue ?? "").trim();
+  return [day, time, venue].filter(Boolean).join(" · ");
 }
 
 // One row per playable source, in the addon's stable order.
@@ -337,6 +354,10 @@ export function renderMatchCard(event, index) {
     status.progress != null
       ? `<span class="sports-status-progress"><span class="sports-status-progress-fill" style="width: ${Math.round(status.progress * 100)}%"></span></span>`
       : "";
+  // Scheduled card footer: day · time · venue, INSIDE the fixed card — the
+  // bands shrink, the card never grows past its measured 129px.
+  const footerText = scheduleFooterText(event);
+  const footerLine = footerText ? `<div class="sports-schedule-footer">${esc(footerText)}</div>` : "";
 
   return `
       <div class="sports-row focusable" role="button"
@@ -345,6 +366,7 @@ export function renderMatchCard(event, index) {
         <div class="sports-bands">
           ${band(home, away)}
           ${band(away, home)}
+          ${footerLine}
         </div>
         <div class="sports-row-status">
           <span class="${status.badgeClass}">${esc(status.badge)}</span>
@@ -400,7 +422,8 @@ export function createSportsScreenMethods02() {
       /* HEADER ---------------------------------------------------------------- */
       .sports-header { flex-shrink: 0; position: relative; padding: 30px 54px 0 84px; box-sizing: border-box; }
       .sports-title { font-size: 39px; line-height: 48px; height: 48px; font-weight: 900; color: #FFFFFF; white-space: nowrap; }
-      .sports-day-row { display: flex; align-items: center; gap: 6px; margin-top: 10px; height: 45px; }
+      .sports-day-row { display: flex; align-items: center; gap: 6px; margin-top: 10px; height: 45px; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+      .sports-day-row::-webkit-scrollbar { display: none; }
       .sports-chip { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; height: 45px; padding: 0 18px; background: transparent; border: 2.25px solid transparent; border-radius: 22.5px; outline: none; font-size: 18px; line-height: 24px; font-weight: 700; color: #8B90A0; cursor: pointer; box-sizing: border-box; white-space: nowrap; }
       .sports-chip.focused { border-color: #FFFFFF; }
       .sports-chip.is-selected { background: rgba(245,245,245,0.14); border-color: rgba(245,245,245,1); color: #FFFFFF; }
@@ -451,6 +474,9 @@ export function createSportsScreenMethods02() {
       .sports-status-situation { max-width: 100%; font-size: 13.5px; line-height: 18px; color: #AAB0BE; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .sports-status-progress { width: 100%; height: 4.5px; border-radius: 3px; background: rgba(255,255,255,0.14); overflow: hidden; }
       .sports-status-progress-fill { display: block; height: 100%; border-radius: 3px; background: #E53935; }
+      /* SCHEDULED FOOTER: a fixed 18px line inside the bands column, under
+         the two bands — the card stays 129px, the bands shrink around it. */
+      .sports-schedule-footer { flex-shrink: 0; display: flex; align-items: center; height: 18px; padding: 0 13.5px; box-sizing: border-box; font-size: 12px; line-height: 14px; font-weight: 700; color: #8B90A0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-top: 1px solid rgba(255,255,255,0.06); }
       .sports-row-chevron { flex-shrink: 0; align-self: center; padding-right: 10.5px; font-size: 24px; line-height: 28px; color: #8B90A0; }
       .sports-state { display: flex; align-items: center; color: #8B90A0; font-size: 19.5px; padding: 20px 4px; }
       .sports-state.is-error { color: #FF8A80; overflow-wrap: anywhere; }
@@ -474,14 +500,17 @@ export function createSportsScreenMethods02() {
     const selected = this.dayKey === chip.id ? " is-selected" : "";
     return `
       <div class="sports-chip focusable${selected}" role="button"
-           data-header-row="0" data-chip-index="${index}" data-day="${chip.id}">
+           data-header-row="0" data-chip-index="${index}" data-day="${escapeHtml(chip.id)}">
         ${escapeHtml(chip.label)}
       </div>
     `;
   }
 
   function renderHeader() {
-    const dayChips = internals.SPORTS_DAY_CHIPS.map((chip, index) => renderDayChip.call(this, chip, index)).join("");
+    // Fresh 15-chip window on every render: labels follow the real calendar.
+    const chips = buildDayWindow(Date.now());
+    this.dayChips = chips;
+    const dayChips = chips.map((chip, index) => renderDayChip.call(this, chip, index)).join("");
     const liveCount = Array.isArray(this.scheduleEvents) ? this.scheduleEvents.filter((event) => event?.state === "in").length : 0;
     return `
       <div class="sports-header">
@@ -489,7 +518,7 @@ export function createSportsScreenMethods02() {
         <div class="sports-day-row">
           ${dayChips}
           <div class="sports-chip sports-refresh focusable" role="button"
-               data-header-row="0" data-chip-index="${internals.SPORTS_DAY_CHIPS.length}" data-action="refresh">
+               data-header-row="0" data-chip-index="${chips.length}" data-action="refresh">
             ${escapeHtml(internals.SPORTS_REFRESH_LABEL)}
           </div>
         </div>
@@ -612,6 +641,17 @@ export function createSportsScreenMethods02() {
         if (target) {
           target.classList.add("focused");
           target.focus();
+          // The 15-chip day row is wider than the header: keep the focused
+          // chip visible with the browser's instant native scroll.
+          const dayRow = target.closest ? target.closest(".sports-day-row") : null;
+          if (dayRow && target.scrollIntoView) {
+            try {
+              target.scrollIntoView({ block: "nearest", inline: "nearest" });
+            } catch (_) {
+              // Old TVs without options support: plain instant scroll.
+              target.scrollIntoView();
+            }
+          }
         }
       } catch (_) {
         // Focus is cosmetic; a failure here must never break navigation state.

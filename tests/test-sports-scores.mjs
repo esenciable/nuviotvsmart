@@ -10,8 +10,7 @@ import assert from "node:assert/strict";
 // Namespace imports + local destructure: a missing export fails exactly the
 // tests that need it instead of load-failing the whole file.
 import * as espnScores from "../js/core/sports/espnScores.js";
-import * as espnSchedule from "../js/core/sports/espnSchedule.js";
-import { parseEvents } from "../js/core/sports/sportsFeed.js";
+import * as espnSchedule from "../js/core/sports/espnSchedule.js";import { parseEvents } from "../js/core/sports/sportsFeed.js";
 import { readFileSync } from "node:fs";
 
 const {
@@ -26,6 +25,8 @@ const {
   espnScoreboardUrl,
   espnDateForDay,
   parseScoreboard,
+  buildDayWindow,
+  DAY_WINDOW_RADIUS,
   normalizeTeamColor
 } = espnScores;
 const {
@@ -156,7 +157,8 @@ describe("slug table: Spanish league names and aliases resolve to ESPN slugs", (
     const slugs = LEAGUE_SLUGS.map((entry) => entry.slug);
     assert.equal(new Set(slugs).size, slugs.length);
     for (const slug of slugs) {
-      assert.match(slug, /^(football|basketball|hockey|baseball|soccer|mma|racing|tennis|golf)\/[a-z0-9.-]+$/);
+      // ESPN's cup slugs carry underscores (soccer/esp.copa_del_rey).
+      assert.match(slug, /^(football|basketball|hockey|baseball|soccer|mma|racing|tennis|golf)\/[a-z0-9._-]+$/);
     }
   });
 
@@ -324,6 +326,145 @@ describe("ESPN scoreboard URL and date key", () => {
     assert.equal(espnDateForDay({ dayKey: "today", events: [], now: NOW }), DAY);
     assert.equal(espnDateForDay({ dayKey: "yesterday", events: [], now: NOW }), "20260114");
     assert.equal(espnDateForDay({ dayKey: "tomorrow", events: [], now: NOW }), "20260116");
+  });
+});
+
+// Cups, international competitions and domestic cups — Spanish AND English
+// names (accent-folded, whole words). The reference Android TV app shows
+// CONCACAF Nations League cards, so the curated table must reach them.
+describe("cup and international slugs resolve in Spanish and English", () => {
+  const cases = [
+    ["CONCACAF Nations League", "soccer/concacaf.nations.league"],
+    ["Liga de Naciones Concacaf", "soccer/concacaf.nations.league"],
+    ["Concacaf Champions Cup", "soccer/concacaf.champions"],
+    ["Copa de Campeones Concacaf", "soccer/concacaf.champions"],
+    ["Gold Cup", "soccer/concacaf.gold"],
+    ["Copa Oro", "soccer/concacaf.gold"],
+    ["Copa América", "soccer/conmebol.america"],
+    ["Eliminatorias Concacaf", "soccer/fifa.worldq.concacaf"],
+    ["FIFA World Cup Qualifying - CONCACAF", "soccer/fifa.worldq.concacaf"],
+    ["Eliminatorias UEFA", "soccer/fifa.worldq.uefa"],
+    ["FIFA World Cup Qualifying - UEFA", "soccer/fifa.worldq.uefa"],
+    ["Amistoso Internacional", "soccer/fifa.friendly"],
+    ["International Friendly", "soccer/fifa.friendly"],
+    ["Mundial Femenino", "soccer/fifa.wwc"],
+    ["FIFA Women's World Cup", "soccer/fifa.wwc"],
+    ["Mundial de Clubes", "soccer/fifa.cwc"],
+    ["Eurocopa", "soccer/uefa.euro"],
+    ["UEFA Nations League", "soccer/uefa.nations"],
+    ["Liga de Naciones", "soccer/uefa.nations"],
+    ["UEFA Women's Champions League", "soccer/uefa.wchampions"],
+    ["Copa del Rey", "soccer/esp.copa_del_rey"],
+    ["Coppa Italia", "soccer/ita.coppa_italia"],
+    ["DFB Pokal", "soccer/ger.dfb_pokal"],
+    ["Coupe de France", "soccer/fra.coupe_de_france"],
+    ["FA Cup", "soccer/eng.fa"],
+    ["Carabao Cup", "soccer/eng.league_cup"]
+  ];
+  for (const [name, slug] of cases) {
+    test(`"${name}" -> ${slug}`, () => {
+      assert.equal(resolveLeagueSlug(name), slug);
+    });
+  }
+
+  test("the established competitions keep their slugs once the cups land", () => {
+    assert.equal(resolveLeagueSlug("UEFA Champions League"), "soccer/uefa.champions");
+    assert.equal(resolveLeagueSlug("Mundial"), "soccer/fifa.world");
+    assert.equal(resolveLeagueSlug("World Cup"), "soccer/fifa.world");
+    assert.equal(resolveLeagueSlug("LaLiga"), "soccer/esp.1");
+    assert.equal(resolveLeagueSlug("Premier League"), "soccer/eng.1");
+  });
+});
+
+describe("day window: 15 chips, 7 days back / today / 7 days forward", () => {
+  test("DAY_WINDOW_RADIUS is 7 and buildDayWindow returns 15 chips", () => {
+    assert.equal(DAY_WINDOW_RADIUS, 7);
+    const chips = buildDayWindow(NOW);
+    assert.equal(chips.length, 15);
+    assert.deepEqual(
+      chips.map((chip) => chip.id),
+      ["-7", "-6", "-5", "-4", "-3", "-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7"]
+    );
+  });
+
+  test("labels: Ayer / Hoy / Mañana in the middle, weekday + day number around them", () => {
+    // 2026-01-15 is a Thursday, so the window runs jue 8 .. jue 22 (local).
+    const chips = buildDayWindow(NOW);
+    assert.equal(chips[0].label, "jue 8");
+    assert.equal(chips[5].label, "mar 13");
+    assert.equal(chips[6].label, "Ayer");
+    assert.equal(chips[7].label, "Hoy");
+    assert.equal(chips[8].label, "Mañana");
+    assert.equal(chips[9].label, "sáb 17");
+    assert.equal(chips[14].label, "jue 22");
+  });
+
+  test("espnDateForDay honours the numeric day keys (per league|date caches stay keyed by ET date)", () => {
+    assert.equal(espnDateForDay({ dayKey: "-7", events: [], now: NOW }), "20260108");
+    assert.equal(espnDateForDay({ dayKey: "-1", events: [], now: NOW }), "20260114");
+    assert.equal(espnDateForDay({ dayKey: "0", events: [], now: NOW }), DAY);
+    assert.equal(espnDateForDay({ dayKey: "7", events: [], now: NOW }), "20260122");
+    // The Ayer/Hoy/Mañana names keep working.
+    assert.equal(espnDateForDay({ dayKey: "yesterday", events: [], now: NOW }), "20260114");
+    assert.equal(espnDateForDay({ dayKey: "tomorrow", events: [], now: NOW }), "20260116");
+  });
+
+  test("the schedule round fetches a paged day with its own ET date", async () => {
+    clearScheduleCache();
+    const { impl, calls } = recordingFetch({ events: [] });
+    await espnScheduleForDay({ dayKey: "7", fetchImpl: impl, now: () => NOW });
+    assert.ok(calls.some((url) => url.includes("dates=20260122")));
+    await espnScheduleForDay({ dayKey: "-7", fetchImpl: impl, now: () => NOW });
+    assert.ok(calls.some((url) => url.includes("dates=20260108")));
+  });
+});
+
+describe("parseScoreboard: venue", () => {
+  test("the competition venue fullName is captured", () => {
+    const payload = {
+      events: [
+        {
+          id: "cur-1",
+          competitions: [
+            {
+              venue: { fullName: "Stadion Ergilio Hato" },
+              competitors: [
+                { homeAway: "home", team: { displayName: "Curaçao" } },
+                { homeAway: "away", team: { displayName: "Panama" } }
+              ],
+              status: { type: { state: "pre" } }
+            }
+          ],
+          status: { type: { state: "pre" } }
+        }
+      ]
+    };
+    const ev = parseScoreboard(payload, "soccer/concacaf.nations.league")[0];
+    assert.equal(ev.venue, "Stadion Ergilio Hato");
+  });
+
+  test("a missing venue degrades to an empty string, never a throw", () => {
+    const payload = {
+      events: [
+        {
+          id: "cur-2",
+          competitions: [
+            {
+              venue: {},
+              competitors: [
+                { homeAway: "home", team: { displayName: "Panama" } },
+                { homeAway: "away", team: { displayName: "Curaçao" } }
+              ],
+              status: { type: { state: "pre" } }
+            }
+          ],
+          status: { type: { state: "pre" } }
+        }
+      ]
+    };
+    const ev = parseScoreboard(payload, "soccer/concacaf.nations.league")[0];
+    assert.equal(ev.venue, "");
+    assert.equal(parseScoreboard(null)[0], undefined);
   });
 });
 

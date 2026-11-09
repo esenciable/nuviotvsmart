@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 
 import {
   SPORTS_ROW_HEIGHT,
+  SPORTS_DAY_WINDOW_RADIUS,
   SPORTS_NO_LINK_TEXT,
   buildMatchRows,
   matchRowTitle,
@@ -91,6 +92,8 @@ const gameEvent = (over = {}) => ({
   ...over
 });
 
+const TODAY_LOCAL = new Date(2026, 10, 12, 19, 30, 0).getTime(); // jue 12 nov, 19:30 local
+
 describe("data flow: ESPN is the schedule, the addon is only the streams", () => {
   test("the schedule round feeds the screen: espnScheduleForDay replaces scoresForDay", () => {
     assert.match(mountSource, /espnScheduleForDay/);
@@ -121,13 +124,39 @@ describe("data flow: ESPN is the schedule, the addon is only the streams", () =>
 });
 
 describe("screen structure: header, day chips, filter pill", () => {
-  test("header carries the title, the Ayer/Hoy/Mañana day chips (default Hoy) and the Actualizar action", () => {
+  test("header carries the title, a 15-day chip window (Ayer / Hoy / Mañana labelled) and the Actualizar action", () => {
     assert.match(renderSource, /Deportes/);
-    assert.match(renderSource, /Ayer/);
-    assert.match(renderSource, /Hoy/);
-    assert.match(renderSource, /Mañana/);
     assert.match(renderSource, /Actualizar/);
+    // The window is built from the ESPN layer: 15 chips whose middle labels
+    // are Ayer / Hoy / Mañana and whose neighbours are weekday + day number.
+    assert.match(renderSource, /buildDayWindow/);
+    assert.equal(SPORTS_DAY_WINDOW_RADIUS, 7);
+    const chips = sportsRenderNS.buildDayWindow(Date.UTC(2026, 0, 15, 12, 0, 0));
+    assert.equal(chips.length, 15);
+    assert.equal(chips[6].label, "Ayer");
+    assert.equal(chips[7].label, "Hoy");
+    assert.equal(chips[8].label, "Mañana");
+    assert.equal(chips[0].label, "jue 8");
     assert.match(mountSource, /dayKey\s*=\s*"today"/);
+  });
+
+  test("the 15 chips actually render, and Actualizar sits after all of them", () => {
+    // The header renders EVERY chip of the day window (no slice, no cap).
+    assert.match(renderSource, /chips\.map\(\(chip, index\) => renderDayChip/);
+    assert.match(renderSource, /data-chip-index="\$\{chips\.length\}" data-action="refresh"/);
+  });
+
+  test("the chip row scrolls and the selected chip is scrolled into view", () => {
+    assert.match(renderSource, /\.sports-day-row\s*\{[^}]*overflow-x:\s*auto/);
+    // applyFocusState keeps the selected chip visible (native instant scroll).
+    const applyStart = renderSource.indexOf("applyFocusState()");
+    const applyBody = renderSource.slice(applyStart, applyStart + 2400);
+    assert.match(applyBody, /scrollIntoView/, "the focused chip scrolls into view");
+  });
+
+  test("header navigation spans all 15 chips plus Actualizar", () => {
+    assert.match(interactSource, /dayChips/);
+    assert.match(interactSource, /headerRowLength/);
   });
 
   test("the selected day chip: bg #F5F5F5@0.14, border #F5F5F5, white text — measured spec", () => {
@@ -147,6 +176,56 @@ describe("screen structure: header, day chips, filter pill", () => {
   test("the day change triggers a refresh; there is NO polling interval anywhere", () => {
     assert.match(mountSource, /changeDay|selectDay/);
     assert.doesNotMatch(allScreenSource, /setInterval/);
+  });
+});
+
+describe("scheduled card footer: day · time · venue inside the fixed card", () => {
+  const preEvent = (over = {}) =>
+    gameEvent({
+      state: "pre",
+      status: "scheduled",
+      live: false,
+      slug: "soccer/concacaf.nations.league",
+      sportType: "soccer",
+      leagueName: "Concacaf Nations League",
+      kickoffMs: TODAY_LOCAL,
+      home: { name: "Curaçao", color: "#002B7F", logo: "", score: 0 },
+      away: { name: "Panama", color: "#DA121A", logo: "", score: 0 },
+      ...over
+    });
+
+  test("a scheduled match shows jue 12 nov · 19:30 · Stadion Ergilio Hato under the bands", () => {
+    const html = renderMatchCard(preEvent({ venue: "Stadion Ergilio Hato" }));
+    assert.match(html, /jue 12 nov · 19:30 · Stadion Ergilio Hato/);
+    assert.match(html, /sports-schedule-footer/);
+  });
+
+  test("no venue from ESPN: the line degrades to day · time, never 'undefined'", () => {
+    const html = renderMatchCard(preEvent({ venue: "" }), 0);
+    assert.match(html, /jue 12 nov · 19:30/);
+    assert.doesNotMatch(html, /undefined/);
+    assert.doesNotMatch(html, /· ·/);
+  });
+
+  test("live and finished matches keep today's behaviour: no footer at all", () => {
+    assert.doesNotMatch(renderMatchCard(gameEvent({ venue: "Somewhere" })), /sports-schedule-footer/);
+    assert.doesNotMatch(renderMatchCard(gameEvent({ state: "post", venue: "Somewhere" })), /sports-schedule-footer/);
+  });
+
+  test("the footer sits INSIDE the fixed 129px card and never pushes the bands", () => {
+    // The card keeps its measured fixed height even with the footer present.
+    assert.match(renderSource, /\.sports-row\s*\{[^}]*height:\s*129px/);
+    assert.match(renderSource, /SPORTS_ROW_HEIGHT\s*=\s*129/);
+    // The footer is a fixed-height, non-growing line inside the bands column;
+    // the bands themselves keep flex:1 + min-height:0 so they shrink.
+    assert.match(renderSource, /\.sports-schedule-footer\s*\{[^}]*flex-shrink:\s*0/);
+    assert.match(renderSource, /\.sports-schedule-footer\s*\{[^}]*height:\s*\d+px/);
+    assert.match(renderSource, /\.sports-team-band\s*\{[^}]*flex:\s*1/);
+    assert.match(renderSource, /\.sports-team-band\s*\{[^}]*min-height:\s*0/);
+    // The footer renders inside the bands column (under the two bands).
+    const html = renderMatchCard(preEvent({ venue: "Estadio Rommel Fernández" }));
+    assert.ok(html.indexOf("Estadio Rommel Fernández") > html.indexOf("Panama"), "the footer follows the bands");
+    assert.ok(html.indexOf("sports-schedule-footer") > html.lastIndexOf("sports-team-band"), "the footer is under both bands");
   });
 });
 

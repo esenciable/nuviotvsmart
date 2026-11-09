@@ -1,7 +1,8 @@
 // Lightweight Sports screen: one vertical list of the day's matches FROM ESPN
 // (site.api.espn.com scoreboard per visible day and league) — EN VIVO,
-// PRÓXIMOS, FINALIZADOS (collapsed by default) — with day chips (Ayer/Hoy/
-// Mañana), a single filter pill and an Actualizar action. Every match renders
+// PRÓXIMOS, FINALIZADOS (collapsed by default) — with a 15-day chip window
+// (Ayer / Hoy / Mañana, 7 days back and forward), a single filter pill and an
+// Actualizar action. Every match renders
 // the SAME card: league column, two team bands (team-coloured gradient, logo,
 // name, record, big score) and a right status column. The Esencial Sport
 // addon is ONLY the stream source: its events are never rendered, they resolve
@@ -25,7 +26,8 @@ export { Router, ScreenUtils, Environment, sportsRepository, buildSections, form
 export {
   SPORTS_ROW_HEIGHT,
   SPORTS_ROW_GAP,
-  SPORTS_DAY_CHIPS,
+  SPORTS_DAY_WINDOW_RADIUS,
+  buildDayWindow,
   SPORTS_REFRESH_LABEL,
   SPORTS_FILTER_PILL_LABEL,
   SPORTS_LOADING_TEXT,

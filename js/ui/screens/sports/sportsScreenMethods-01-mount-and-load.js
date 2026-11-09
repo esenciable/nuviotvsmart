@@ -38,18 +38,19 @@ export function createSportsScreenMethods01() {
       this.loading = true;
       this.error = "";
 
-      // Day chips: Ayer / Hoy / Mañana — default Hoy. FINALIZADOS starts
-      // collapsed.
+      // Day chips: a 15-day window (7 back / today / 7 forward) — default
+      // Hoy (the window's centre). FINALIZADOS starts collapsed.
       this.dayKey = "today";
+      this.dayChips = [];
       this.sections = buildSections([]);
       this.finishedExpanded = false;
 
       // Deterministic focus state: header (row 0: day chips + Actualizar;
       // row 1: the filter pill) or the flat card list. The default header
-      // index points at Hoy (day chip 1).
+      // index points at Hoy (the window centre, index 7).
       this.focusZone = "header";
       this.headerRow = 0;
-      this.headerIndex = 1;
+      this.headerIndex = internals.SPORTS_DAY_WINDOW_RADIUS;
       this.rowIndex = 0;
 
       // Resolve / notice state.

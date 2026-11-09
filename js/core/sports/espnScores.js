@@ -30,10 +30,11 @@ export const ESPN_REQUEST_TIMEOUT_MS = 1200;
 // Bounded burst: at most 6 league scoreboards in flight — parallel enough to
 // fill the cartelera in ~5 waves, never a thundering herd on a 1 GB TV.
 export const ESPN_MAX_CONCURRENT = 6;
-// Overall round cap: the worst full burst is ceil(28 / 6) × 1200 ms ≈ 6 s, so
-// 9 s covers it with scheduling slack. A league dispatched after the cap is
+// Overall round cap: the worst full burst is ceil(N / 6) × 1200 ms over the
+// N curated leagues (46 today → 8 waves ≈ 9.6 s), so 12 s covers it with
+// scheduling slack. A league dispatched after the cap is
 // reported in `skipped`, never silently dropped.
-export const ESPN_ROUND_BUDGET_MS = 9000;
+export const ESPN_ROUND_BUDGET_MS = 12000;
 // TWO caches, two purposes (see espnSchedule.js): a day's fixtures barely
 // change — the SCHEDULE cache keeps a league|date for 10 minutes; live scores
 // are the only thing needing freshness — the LIVE cache keeps a league|date
@@ -87,6 +88,18 @@ export const LEAGUE_SLUGS = [
   { slug: "hockey/nhl", aliases: ["nhl", "national hockey league"] },
   { slug: "baseball/mlb", aliases: ["mlb", "major league baseball", "beisbol mlb"] },
   // Cups and international competitions BEFORE domestic leagues.
+  // Women's Champions League BEFORE the men's row: "UEFA Women's Champions
+  // League" contains the phrase "champions league".
+  {
+    slug: "soccer/uefa.wchampions",
+    aliases: ["women s champions league", "womens champions league", "champions femenina", "uwcl"]
+  },
+  // CONCACAF Champions Cup BEFORE the men's UEFA row: "Concacaf Champions
+  // Cup" matches the broad "champions" alias of uefa.champions.
+  {
+    slug: "soccer/concacaf.champions",
+    aliases: ["concacaf champions", "champions cup", "copa de campeones", "copa campeones"]
+  },
   {
     slug: "soccer/uefa.champions",
     aliases: ["champions league", "uefa champions", "champions", "copa de europa"]
@@ -103,10 +116,61 @@ export const LEAGUE_SLUGS = [
   },
   { slug: "soccer/conmebol.libertadores", aliases: ["libertadores", "copa libertadores"] },
   { slug: "soccer/conmebol.sudamericana", aliases: ["sudamericana", "copa sudamericana"] },
+  // International cups, qualifiers and friendlies BEFORE the world-cup row and
+  // the domestic leagues whose names they contain. The folded-name collisions
+  // this order resolves: "Mundial de Clubes" vs "Mundial", "FIFA Women's World
+  // Cup" vs "World Cup", "FIFA World Cup Qualifying - <confed>" vs "World Cup",
+  // "CONCACAF Nations League" vs "Nations League", "Concacaf Champions Cup"
+  // vs "champions", "UEFA Women's Champions League" vs "champions".
+  { slug: "soccer/fifa.cwc", aliases: ["mundial de clubes", "club world cup", "copa de clubes"] },
+  {
+    slug: "soccer/fifa.wwc",
+    aliases: ["women s world cup", "mundial femenino", "wwc", "world cup femenino"]
+  },
+  {
+    slug: "soccer/fifa.worldq.uefa",
+    aliases: ["eliminatorias uefa", "world cup qualifying uefa", "european qualifiers"]
+  },
+  {
+    slug: "soccer/fifa.worldq.concacaf",
+    aliases: [
+      "eliminatorias concacaf",
+      "world cup qualifying concacaf",
+      "concacaf qualifiers",
+      "eliminatorias",
+      "eliminatoria mundialista"
+    ]
+  },
+  {
+    slug: "soccer/fifa.friendly",
+    aliases: ["amistoso", "amistoso internacional", "international friendly", "friendly"]
+  },
+  {
+    slug: "soccer/concacaf.nations.league",
+    aliases: ["concacaf nations league", "liga de naciones concacaf", "concacaf nations"]
+  },
+  { slug: "soccer/uefa.nations", aliases: ["nations league", "liga de naciones", "uefa nations"] },
+  { slug: "soccer/concacaf.gold", aliases: ["gold cup", "copa oro"] },
+  {
+    slug: "soccer/uefa.euro",
+    aliases: ["euro", "eurocopa", "european championship", "campeonato europeo"]
+  },
+  { slug: "soccer/conmebol.america", aliases: ["copa america", "america cup", "conmebol america"] },
   {
     slug: "soccer/fifa.world",
-    aliases: ["mundial", "mundial de clubes", "world cup", "copa del mundo"]
+    aliases: ["mundial", "world cup", "copa del mundo"]
   },
+  // Domestic cups BEFORE the domestic leagues ("Copa del Rey" must never fall
+  // through to "LaLiga", "FA Cup" never to the Premier League row).
+  { slug: "soccer/eng.fa", aliases: ["fa cup", "copa fa", "emirates fa cup"] },
+  {
+    slug: "soccer/eng.league_cup",
+    aliases: ["league cup", "efl cup", "carabao cup", "copa de la liga", "copa carabao"]
+  },
+  { slug: "soccer/esp.copa_del_rey", aliases: ["copa del rey", "copa del rey espana"] },
+  { slug: "soccer/ita.coppa_italia", aliases: ["coppa italia", "copa italia"] },
+  { slug: "soccer/ger.dfb_pokal", aliases: ["dfb pokal", "pokal", "copa alemana"] },
+  { slug: "soccer/fra.coupe_de_france", aliases: ["coupe de france", "copa de francia"] },
   // "Brasileirão Serie A" must resolve here, never to Italy's "Serie A".
   { slug: "soccer/bra.1", aliases: ["brasileirao", "brasileiro", "brasil", "brazil"] },
   {
@@ -140,6 +204,50 @@ export const LEAGUE_SLUGS = [
   { slug: "tennis/wta", aliases: ["wta"] },
   { slug: "golf/pga", aliases: ["pga"] }
 ];
+
+// Day window (15 chips): 7 days back, today, 7 days forward. Ids are the
+// numeric day offsets ("-7".."7") — espnDateForDay turns them into ET dates
+// and the schedule cache stays keyed per league|date. Labels: Ayer / Hoy /
+// Mañana for the middle three, weekday + day number ("jue 12") for the rest.
+export const DAY_WINDOW_RADIUS = 7;
+const ES_WEEKDAYS = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
+const ES_MONTHS = [
+  "ene",
+  "feb",
+  "mar",
+  "abr",
+  "may",
+  "jun",
+  "jul",
+  "ago",
+  "sep",
+  "oct",
+  "nov",
+  "dic"
+];
+
+export function buildDayWindow(now = Date.now()) {
+  const base = new Date(Number(now) || Date.now());
+  const chips = [];
+  for (let offset = -DAY_WINDOW_RADIUS; offset <= DAY_WINDOW_RADIUS; offset += 1) {
+    const date = new Date(base.getFullYear(), base.getMonth(), base.getDate() + offset);
+    let label;
+    if (offset === -1) label = "Ayer";
+    else if (offset === 0) label = "Hoy";
+    else if (offset === 1) label = "Mañana";
+    else label = `${ES_WEEKDAYS[date.getDay()]} ${date.getDate()}`;
+    chips.push({ id: String(offset), offset, label });
+  }
+  return chips;
+}
+
+// The scheduled card's day label, local to the viewer: "jue 12 nov".
+export function formatKickoffDayLabel(kickoffMs) {
+  const ms = Number(kickoffMs);
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const date = new Date(ms);
+  return `${ES_WEEKDAYS[date.getDay()]} ${date.getDate()} ${ES_MONTHS[date.getMonth()]}`;
+}
 
 // Accent/punctuation folding: "Fútbol" -> "futbol", "C. A. Osasuna" -> "c a osasuna".
 export function foldText(value) {
@@ -232,8 +340,17 @@ export function espnDateForDay({ dayKey = "today", events = [], now = Date.now()
     }
     if (best) return best;
   }
-  const offset = dayKey === "yesterday" ? -1 : dayKey === "tomorrow" ? 1 : 0;
+  const offset = dayKeyOffset(dayKey);
   return etDateKey(nowTs + offset * DAY_MS);
+}
+
+// A dayKey is a named offset (Ayer/Hoy/Mañana legacy names) or a numeric
+// offset string from the 15-day window ("-7".."7").
+function dayKeyOffset(dayKey) {
+  if (dayKey === "yesterday") return -1;
+  if (dayKey === "tomorrow") return 1;
+  const num = Number(dayKey);
+  return Number.isFinite(num) ? Math.trunc(num) : 0;
 }
 
 // normalizeNow: a function clock is called; a finite number is used as-is;
@@ -311,6 +428,9 @@ export function parseScoreboardEvent(event, slug = "", meta = {}) {
     leagueName: String(meta.leagueName ?? "").trim(),
     leagueAbbr: String(meta.leagueAbbr ?? "").trim(),
     leagueLogo: String(meta.leagueLogo ?? "").trim(),
+    // The scheduled card's footer line carries the venue when ESPN provides
+    // one ("Stadion Ergilio Hato"); absent venues degrade to "".
+    venue: String(comp?.venue?.fullName ?? "").trim(),
     state,
     // Derived partition fields so buildSections/partitionEvents consume the
     // event unchanged (status: finished | live | scheduled).

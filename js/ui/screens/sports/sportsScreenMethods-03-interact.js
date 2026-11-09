@@ -73,8 +73,8 @@ export function createSportsScreenMethods03() {
 
     headerRowLength(row) {
       if (row === 0) {
-        // day chips + Actualizar
-        return 4;
+        // 15 day chips + Actualizar.
+        return (this.dayChips?.length || 15) + 1;
       }
       // row 1: the single filter pill.
       return 1;
@@ -117,9 +117,10 @@ export function createSportsScreenMethods03() {
     handleEnter() {
       if (this.focusZone === "header") {
         if (this.headerRow === 0) {
-          const dayChips = internals.SPORTS_DAY_CHIPS;
-          if (this.headerIndex < dayChips.length) {
-            this.changeDay(dayChips[this.headerIndex].id);
+          const dayChips = this.dayChips?.length ? this.dayChips : internals.buildDayWindow(Date.now());
+          const chip = dayChips[this.headerIndex || 0];
+          if (chip) {
+            this.changeDay(chip.id);
           } else {
             this.refresh();
           }
