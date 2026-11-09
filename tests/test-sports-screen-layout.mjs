@@ -740,3 +740,25 @@ test("the screen mounts on the same day id its centre chip uses", async () => {
   assert.match(mountSource, /this\.dayKey\s*=\s*"0"/, "mount must default to the centre chip id");
   assert.doesNotMatch(mountSource, /this\.dayKey\s*=\s*"today"/, "the legacy day key must be gone");
 });
+
+// Regression: the mount passed its own load token to loadSchedule, whose paint guard
+// compares against a different counter (scoresToken). Every progressive paint of the
+// first load was discarded, so the cartelera appeared only after changing day and back.
+test("the entry load uses loadSchedule's own token, not the mount token", async () => {
+  const fs = await import("node:fs/promises");
+  const mountSource = await fs.readFile(
+    new URL("../js/ui/screens/sports/sportsScreenMethods-01-mount-and-load.js", import.meta.url),
+    "utf8"
+  );
+  assert.doesNotMatch(
+    mountSource,
+    /loadSchedule\(\{\s*token\s*\}\)/,
+    "the mount must not pass a foreign token to loadSchedule"
+  );
+  assert.match(mountSource, /loadSchedule\(\{\}\)/, "the entry load calls loadSchedule with no token");
+  assert.match(
+    mountSource,
+    /myToken === this\.scoresToken/,
+    "the paint guard compares against scoresToken"
+  );
+});

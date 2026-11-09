@@ -80,7 +80,11 @@ export function createSportsScreenMethods01() {
       // Entry: the ESPN schedule paints the list; the addon pool rides along
       // (its TTL decides network vs warm cache).
       this.loadAddonEvents({ force: false });
-      return this.loadSchedule({ token });
+      // No token here: loadSchedule guards every paint against its OWN counter
+      // (scoresToken). Passing the mount token made canPaint() compare two
+      // different counters, so the first load discarded every progressive paint
+      // and the list stayed empty until the user changed day and came back.
+      return this.loadSchedule({});
     },
 
     // The addon events pool: fetched, parsed and STORED — never rendered.
