@@ -1,0 +1,18 @@
+# Magis CORS proxy: the VIDAA browser app cannot call the portal directly
+# because the portal never answers the preflight with Access-Control-Allow-Origin.
+# Deployed by Dokploy from this repository (see docs/magis-proxy.md).
+FROM node:20-alpine
+
+WORKDIR /app
+
+# The proxy is a single file with no dependencies beyond the Node runtime.
+COPY scripts/magis-proxy.mjs ./proxy.mjs
+
+ENV MAGIS_PROXY_PORT=7300
+EXPOSE 7300
+
+# Fail fast and loudly if the deployed file cannot start.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.MAGIS_PROXY_PORT||7300)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "./proxy.mjs"]
