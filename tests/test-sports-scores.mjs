@@ -170,14 +170,14 @@ describe("slug table: Spanish league names and aliases resolve to ESPN slugs", (
 });
 
 describe("constants: the burst budget and the two cache TTLs", () => {
-  test("6 concurrent, 1200 ms per request, 10 min schedule TTL, 60 s live TTL, 20 min match window", () => {
+  test("6 concurrent, 2500 ms per request, 10 min schedule TTL, 60 s live TTL, 20 min match window", () => {
     assert.equal(ESPN_MAX_CONCURRENT, 6);
-    assert.equal(ESPN_REQUEST_TIMEOUT_MS, 1200);
+    assert.equal(ESPN_REQUEST_TIMEOUT_MS, 2500);
     assert.equal(ESPN_SCHEDULE_TTL_MS, 10 * MIN);
     assert.equal(ESPN_LIVE_TTL_MS, 60 * 1000);
     assert.equal(ESPN_MATCH_WINDOW_MS, 20 * MIN);
     // The round budget must cover the FULL bounded burst: ceil(28 / 6) waves
-    // of 1200 ms — the first load may never be cut short by the cap.
+    // of 2500 ms — the first load may never be cut short by the cap.
     assert.ok(
       ESPN_ROUND_BUDGET_MS >=
         Math.ceil(LEAGUE_SLUGS.length / ESPN_MAX_CONCURRENT) * ESPN_REQUEST_TIMEOUT_MS,

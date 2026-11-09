@@ -26,7 +26,10 @@ import { groupEventsByDay } from "./sportsFeed.js";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const ESPN_SCOREBOARD_BASE = "https://site.api.espn.com/apis/site/v2/sports";
-export const ESPN_REQUEST_TIMEOUT_MS = 1200;
+// A 1200 ms budget lost six major leagues in one measured round while six
+// concurrent curl requests answered in 0.6 s: the burst, not the network, was
+// the limit. 2500 ms keeps the worst case inside the round budget.
+export const ESPN_REQUEST_TIMEOUT_MS = 2500;
 // Bounded burst: at most 6 league scoreboards in flight — parallel enough to
 // fill the cartelera in ~5 waves, never a thundering herd on a 1 GB TV.
 export const ESPN_MAX_CONCURRENT = 6;
@@ -34,7 +37,8 @@ export const ESPN_MAX_CONCURRENT = 6;
 // N curated leagues (46 today → 8 waves ≈ 9.6 s), so 12 s covers it with
 // scheduling slack. A league dispatched after the cap is
 // reported in `skipped`, never silently dropped.
-export const ESPN_ROUND_BUDGET_MS = 12000;
+// Must cover the worst burst: ceil(slugs / 6) waves at the per-request budget.
+export const ESPN_ROUND_BUDGET_MS = 22000;
 // TWO caches, two purposes (see espnSchedule.js): a day's fixtures barely
 // change — the SCHEDULE cache keeps a league|date for 10 minutes; live scores
 // are the only thing needing freshness — the LIVE cache keeps a league|date

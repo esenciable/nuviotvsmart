@@ -40,7 +40,10 @@ export function createSportsScreenMethods01() {
 
       // Day chips: a 15-day window (7 back / today / 7 forward) — default
       // Hoy (the window's centre). FINALIZADOS starts collapsed.
-      this.dayKey = "today";
+      // Must match the centre chip id from buildDayWindow(): the schedule layer
+      // keys days numerically ("0" = today), so the legacy "today" string resolved
+      // to a different date and the list looked empty until the chip was pressed.
+      this.dayKey = "0";
       this.dayChips = [];
       this.sections = buildSections([]);
       this.finishedExpanded = false;

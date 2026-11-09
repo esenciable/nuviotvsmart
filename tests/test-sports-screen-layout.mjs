@@ -137,7 +137,7 @@ describe("screen structure: header, day chips, filter pill", () => {
     assert.equal(chips[7].label, "Hoy");
     assert.equal(chips[8].label, "Mañana");
     assert.equal(chips[0].label, "jue 8");
-    assert.match(mountSource, /dayKey\s*=\s*"today"/);
+    assert.match(mountSource, /dayKey\s*=\s*"0"/);
   });
 
   test("the 15 chips actually render, and Actualizar sits after all of them", () => {
@@ -726,4 +726,17 @@ test("every helper the sibling modules destructure is exported by the screen mod
   for (const name of ["escapeHtml", "isBackEvent", "formatKickoffTime", "buildSections"]) {
     assert.equal(typeof screen[name], "function", `${name} must be callable`);
   }
+});
+
+// Regression: the mount used a legacy day key ("today") while the chips use numeric
+// ids, so the first paint resolved a different date and the list looked empty until
+// the user pressed the "Hoy" chip.
+test("the screen mounts on the same day id its centre chip uses", async () => {
+  const fs = await import("node:fs/promises");
+  const mountSource = await fs.readFile(
+    new URL("../js/ui/screens/sports/sportsScreenMethods-01-mount-and-load.js", import.meta.url),
+    "utf8"
+  );
+  assert.match(mountSource, /this\.dayKey\s*=\s*"0"/, "mount must default to the centre chip id");
+  assert.doesNotMatch(mountSource, /this\.dayKey\s*=\s*"today"/, "the legacy day key must be gone");
 });
