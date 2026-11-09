@@ -17,6 +17,7 @@ import * as internals from "./sportsScreen.js";
 // document.visibilityState === "visible" — armed on mount, stopped on unmount
 // and on hide (restarted on show, which also re-scores immediately).
 import { espnScheduleForDay } from "../../../core/sports/espnSchedule.js";
+import { sportingEventsForDay } from "../../../core/sports/sportingEvents.js";
 
 export function createSportsScreenMethods01() {
   const { Router, ScreenUtils, sportsRepository, buildSections } = internals;
@@ -122,6 +123,30 @@ export function createSportsScreenMethods01() {
       this.rebuildDerivedState();
       this.render({ preserveFocus: false });
       this.renderPartialNotice();
+      // SECOND SCHEDULE SOURCE (sporting-events.org): the four competitions
+      // ESPN lacks (cricket, darts, rugby league, snooker) are fetched only
+      // AFTER the ESPN slate painted. Their rows map into the SAME unified
+      // event shape, so buildSections places them under the existing
+      // PRÓXIMOS section. A failure here must NEVER touch the ESPN list: one
+      // muted line, no retry loop (the module's per-slug 6 h success / 10 min
+      // failure cache throttles every repeat attempt by itself).
+      try {
+        const secondary = await sportingEventsForDay({ dayKey: this.dayKey });
+        if (!canPaint()) return; // the screen or the day moved on
+        if (Array.isArray(secondary?.events) && secondary.events.length) {
+          this.scheduleEvents = [...this.scheduleEvents, ...secondary.events];
+          this.rebuildDerivedState();
+          this.render({ preserveFocus: false });
+          this.renderPartialNotice();
+        }
+        if (Array.isArray(secondary?.failedSlugs) && secondary.failedSlugs.length) {
+          this.renderSecondaryNotice(secondary.failedSlugs);
+        }
+      } catch (_) {
+        // Strictly additive: an unexpected failure in the secondary path
+        // leaves the ESPN list exactly as painted, with one muted line.
+        this.renderSecondaryNotice(["sporting-events.org"]);
+      }
     },
 
     // Quiet partial-failure note: when some leagues failed on a load that
@@ -139,6 +164,26 @@ export function createSportsScreenMethods01() {
         note.textContent = `${this.scheduleFailed} ${
           this.scheduleFailed === 1 ? "liga sin datos" : "ligas sin datos"
         } (se reintenta automáticamente)`;
+        list.appendChild(note);
+      } catch (_) {
+        // A cosmetic note must never break the schedule render.
+      }
+    },
+
+    // One muted line for the SECOND schedule source (sporting-events.org):
+    // when one of its slugs failed on this load, the count and slugs are said
+    // quietly — never an error state, never a retry loop. Appended after the
+    // render (like renderPartialNotice); the next schedule load repaints or
+    // clears it honestly. The ESPN list above it is untouched.
+    renderSecondaryNotice(failedSlugs) {
+      try {
+        const failed = (Array.isArray(failedSlugs) ? failedSlugs : []).filter(Boolean);
+        if (!this.container || !failed.length) return;
+        const list = this.container.querySelector(".sports-list");
+        if (!list || list.querySelector(".sports-secondary-note")) return;
+        const note = document.createElement("div");
+        note.className = "sports-state sports-secondary-note";
+        note.textContent = `Fuente secundaria sin datos: ${failed.join(", ")}`;
         list.appendChild(note);
       } catch (_) {
         // A cosmetic note must never break the schedule render.

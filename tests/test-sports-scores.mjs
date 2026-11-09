@@ -10,7 +10,8 @@ import assert from "node:assert/strict";
 // Namespace imports + local destructure: a missing export fails exactly the
 // tests that need it instead of load-failing the whole file.
 import * as espnScores from "../js/core/sports/espnScores.js";
-import * as espnSchedule from "../js/core/sports/espnSchedule.js";import { parseEvents } from "../js/core/sports/sportsFeed.js";
+import * as espnSchedule from "../js/core/sports/espnSchedule.js";import { parseEvents, buildSections } from "../js/core/sports/sportsFeed.js";
+import * as sportingEvents from "../js/core/sports/sportingEvents.js";
 import { readFileSync } from "node:fs";
 
 const {
@@ -36,6 +37,19 @@ const {
   resolveStreamsForEvent,
   clearScheduleCache
 } = espnSchedule;
+const {
+  SPORTING_EVENTS_BASE_URL,
+  SPORTING_EVENTS_SLUGS,
+  SPORTING_EVENTS_MAX_BYTES,
+  SPORTING_EVENTS_CACHE_TTL_MS,
+  SPORTING_EVENTS_FAILURE_TTL_MS,
+  sportingEventsUrl,
+  sportingEventKickoffMs,
+  parseSportingEvents,
+  sportingEventsForLocalDay,
+  sportingEventsForDay,
+  clearSportingEventsCache
+} = sportingEvents;
 
 const MIN = 60 * 1000;
 
@@ -901,5 +915,425 @@ describe("the screen says a partial load quietly", () => {
     assert.match(mountSource, /sports-partial-note/);
     assert.match(mountSource, /sin datos/);
     assert.match(mountSource, /espnScheduleForDay\(\{[\s\S]*?onProgress/, "the screen paints progressively");
+  });
+});
+
+// ===========================================================================
+// sporting-events.org: the SECOND schedule source — the four competitions
+// ESPN does not cover (cricket, darts, rugby league, snooker). No scores, no
+// colours, no logos: every fixture is a scheduled card. All tests are OFFLINE:
+// every fetch is injected as text bodies (the size guard reads before parsing).
+// ===========================================================================
+
+const SE_NOW = Date.UTC(2026, 0, 15, 12, 0, 0);
+const SE_DAY_MS = 24 * 60 * 60 * 1000;
+
+// UTC wall-clock parts of an instant, as the feed's date_utc/time_utc fields.
+// Re-parsed as UTC they reproduce the instant (seconds are 0), so tests are
+// timezone-independent by construction.
+function utcPartsFor(ms) {
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, "0");
+  return {
+    date_utc: `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`,
+    time_utc: `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`
+  };
+}
+
+// A fetch double answering URLs with TEXT bodies (the layer reads .text() and
+// parses JSON itself, so the size guard is observable). Entries: { text } |
+// { text, status } | { boom: true }.
+function textFetch(byUrl) {
+  const calls = [];
+  const impl = async (url) => {
+    calls.push(String(url));
+    const responder = byUrl[String(url)];
+    if (!responder) throw new Error(`unexpected url ${url}`);
+    if (responder.boom) throw new Error("network down");
+    return {
+      ok: (responder.status ?? 200) >= 200 && (responder.status ?? 200) < 300,
+      status: responder.status ?? 200,
+      text: async () => responder.text
+    };
+  };
+  return { impl, calls };
+}
+
+const CRICKET_ROW = {
+  match: "ind-vs-aus-1",
+  date_utc: "2026-01-15",
+  time_utc: "20:30",
+  // The fixture string is deliberately WRONG ("Away at Home" reversed): the
+  // sides must come from home_team/away_team, never from this string.
+  fixture: "Australia at India",
+  home_team: "India",
+  away_team: "Australia"
+};
+
+function cricketPayloadText() {
+  return JSON.stringify({ competition: "Cricket", event_count: 1, events: [CRICKET_ROW] });
+}
+
+describe("sporting-events.org: the slug table is exactly the four competitions ESPN lacks", () => {
+  test("cricket, darts, rugby-league, snooker — with Spanish display names — and NEVER nba/f1", () => {
+    assert.deepEqual(
+      SPORTING_EVENTS_SLUGS.map((entry) => entry.slug),
+      ["cricket", "darts", "rugby-league", "snooker"]
+    );
+    assert.deepEqual(
+      SPORTING_EVENTS_SLUGS.map((entry) => entry.label),
+      ["Cricket", "Dardos", "Rugby League", "Snooker"]
+    );
+    assert.ok(!SPORTING_EVENTS_SLUGS.some((entry) => ["nba", "f1", "euroleague", "acb"].includes(entry.slug)));
+  });
+
+  test("the 64 KB size guard, the 6 h per-slug revalidation and the bounded failure TTL", () => {
+    assert.equal(SPORTING_EVENTS_BASE_URL, "https://sporting-events.org/data");
+    assert.equal(SPORTING_EVENTS_MAX_BYTES, 64 * 1024);
+    assert.equal(SPORTING_EVENTS_CACHE_TTL_MS, 6 * 60 * 60 * 1000);
+    assert.ok(SPORTING_EVENTS_FAILURE_TTL_MS > 0 && SPORTING_EVENTS_FAILURE_TTL_MS < SPORTING_EVENTS_CACHE_TTL_MS);
+  });
+
+  test("one measured endpoint per slug: /data/<slug>.json", () => {
+    assert.equal(sportingEventsUrl("cricket"), "https://sporting-events.org/data/cricket.json");
+    assert.equal(sportingEventsUrl("rugby-league"), "https://sporting-events.org/data/rugby-league.json");
+  });
+});
+
+describe("sporting-events.org: kickoff from date_utc + time_utc (UTC), never guessed", () => {
+  test("the pair parses as a UTC instant and is timezone-independent", () => {
+    assert.equal(
+      sportingEventKickoffMs({ date_utc: "2026-01-15", time_utc: "20:30" }),
+      Date.parse("2026-01-15T20:30:00Z")
+    );
+    assert.equal(
+      sportingEventKickoffMs({ date_utc: "2026-11-01", time_utc: "20:30:00" }),
+      Date.parse("2026-11-01T20:30:00Z")
+    );
+  });
+
+  test("a missing or broken pair yields 0 (the row is dropped later), never NaN", () => {
+    assert.equal(sportingEventKickoffMs({}), 0);
+    assert.equal(sportingEventKickoffMs({ date_utc: "2026-01-15" }), 0);
+    assert.equal(sportingEventKickoffMs({ date_utc: "x", time_utc: "y" }), 0);
+    assert.equal(sportingEventKickoffMs(null), 0);
+  });
+});
+
+describe("sporting-events.org: fixture -> the SAME unified event shape ESPN produces", () => {
+  test("sides come from home_team/away_team (authoritative); the 'Away at Home' string is ignored", () => {
+    const events = parseSportingEvents(
+      { events: [CRICKET_ROW] },
+      { slug: "cricket", label: "Cricket" }
+    );
+    assert.equal(events.length, 1);
+    const ev = events[0];
+    assert.equal(ev.id, "se:cricket:ind-vs-aus-1");
+    assert.equal(ev.leagueName, "Cricket");
+    assert.equal(ev.state, "pre");
+    assert.equal(ev.status, "scheduled", "this source has no scores: always scheduled");
+    assert.equal(ev.live, false);
+    assert.equal(ev.kickoffMs, Date.parse("2026-01-15T20:30:00Z"));
+    assert.equal(ev.venue, null);
+    assert.equal(ev.home.name, "India", "home_team wins over the fixture string");
+    assert.equal(ev.away.name, "Australia", "away_team wins over the fixture string");
+    assert.notEqual(ev.home.name, "Australia", "the fixture string must never be parsed");
+    // No scores/colours/logos exist here: honest nulls, same card geometry.
+    assert.equal(ev.home.score, null);
+    assert.equal(ev.home.record, null);
+    assert.equal(ev.home.color, null);
+    assert.equal(ev.home.logo, null);
+    assert.equal(ev.home.abbr, "");
+    assert.equal(ev.away.score, null);
+    assert.equal(ev.away.record, null);
+    assert.equal(ev.away.color, null);
+    assert.equal(ev.away.logo, null);
+  });
+
+  test("a fixture whose kickoff already passed stays a scheduled 'pre' card within the grace window", () => {
+    const passed = new Date(SE_NOW - 2 * 60 * 60 * 1000); // 2 h ago
+    const row = {
+      match: "late-fixture",
+      ...utcPartsFor(passed.getTime()),
+      fixture: "A at B",
+      home_team: "A",
+      away_team: "B"
+    };
+    const events = parseSportingEvents({ events: [row] }, { slug: "snooker", label: "Snooker" });
+    assert.equal(events.length, 1);
+    assert.equal(events[0].state, "pre");
+    assert.equal(events[0].status, "scheduled");
+    assert.equal(events[0].home.score, null);
+  });
+
+  test("garbage rows are dropped, never a throw", () => {
+    const events = parseSportingEvents(
+      {
+        events: [
+          { match: "m1", date_utc: "2026-01-15", time_utc: "20:30", home_team: "India" },
+          { match: "m2", date_utc: "2026-01-15", time_utc: "20:30", away_team: "Australia" },
+          { date_utc: "2026-01-15", time_utc: "20:30", home_team: "A", away_team: "B" },
+          { match: "m4", date_utc: "bad", time_utc: "20:30", home_team: "A", away_team: "B" },
+          null,
+          "junk"
+        ]
+      },
+      { slug: "cricket", label: "Cricket" }
+    );
+    assert.deepEqual(events, []);
+    assert.deepEqual(parseSportingEvents(null, { slug: "cricket", label: "Cricket" }), []);
+    assert.deepEqual(parseSportingEvents({}, { slug: "cricket", label: "Cricket" }), []);
+  });
+
+  test("the mapped events land in the SAME sections: PRÓXIMOS, never EN VIVO", () => {
+    const events = parseSportingEvents(
+      { events: [CRICKET_ROW] },
+      { slug: "cricket", label: "Cricket" }
+    );
+    const sections = buildSections(events);
+    assert.equal(sections.find((s) => s.key === "live").events.length, 0);
+    assert.equal(sections.find((s) => s.key === "upcoming").events.length, 1);
+    assert.equal(sections.find((s) => s.key === "finished").events.length, 0);
+  });
+});
+
+describe("sporting-events.org: day filtering by the device's LOCAL date", () => {
+  // Local-midnight helper: the day bucket of an instant, as a dayKey offset.
+  function localDayOffset(ms, now) {
+    const a = new Date(ms);
+    const b = new Date(now);
+    const startA = new Date(a.getFullYear(), a.getMonth(), a.getDate()).getTime();
+    const startB = new Date(b.getFullYear(), b.getMonth(), b.getDate()).getTime();
+    return Math.round((startA - startB) / SE_DAY_MS);
+  }
+
+  test("an event in the requested local day is kept; a neighbouring local day is not", () => {
+    // Kickoff exactly at `now`: same local day by construction, whatever the TZ.
+    const events = [{ kickoffMs: SE_NOW, id: "se:cricket:1" }];
+    assert.equal(sportingEventsForLocalDay(events, { dayKey: "0", now: SE_NOW }).length, 1);
+    // Tomorrow's local day: excluded from "0", included with dayKey "1".
+    const tomorrow = new Date(SE_NOW);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tmr = { kickoffMs: tomorrow.getTime(), id: "se:cricket:2" };
+    assert.equal(sportingEventsForLocalDay([tmr], { dayKey: "0", now: SE_NOW }).length, 0);
+    assert.equal(sportingEventsForLocalDay([tmr], { dayKey: "1", now: SE_NOW }).length, 1);
+    // Yesterday's local day: excluded from "0"; numeric keys work.
+    const yesterday = new Date(SE_NOW);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yst = { kickoffMs: yesterday.getTime(), id: "se:cricket:3" };
+    assert.equal(sportingEventsForLocalDay([yst], { dayKey: "0", now: SE_NOW }).length, 0);
+    // (a full calendar day back is always beyond the grace window, so "-1"
+    // drops it too — see the next test)
+    assert.equal(sportingEventsForLocalDay([yst], { dayKey: "-1", now: SE_NOW }).length, 0);
+  });
+
+  test("a passed kickoff stays visible a few hours, then is dropped", () => {
+    const twoHoursAgo = SE_NOW - 2 * 60 * 60 * 1000;
+    const fiveHoursAgo = SE_NOW - 5 * 60 * 60 * 1000;
+    const keptDay = String(localDayOffset(twoHoursAgo, SE_NOW));
+    // 2 h old: inside the grace window, still visible on its own local day.
+    assert.equal(
+      sportingEventsForLocalDay([{ kickoffMs: twoHoursAgo, id: "late" }], { dayKey: keptDay, now: SE_NOW }).length,
+      1
+    );
+    // 5 h old: dropped even on its own local day.
+    const oldDay = String(localDayOffset(fiveHoursAgo, SE_NOW));
+    assert.equal(
+      sportingEventsForLocalDay([{ kickoffMs: fiveHoursAgo, id: "older" }], { dayKey: oldDay, now: SE_NOW }).length,
+      0
+    );
+  });
+
+  test("date_utc + time_utc are bucketed by the DEVICE's local date, whatever timezone that is", () => {
+    const { date_utc, time_utc } = utcPartsFor(SE_NOW);
+    const kickoff = sportingEventKickoffMs({ date_utc, time_utc });
+    assert.equal(kickoff, SE_NOW);
+    // The parsed UTC instant is bucketed by its LOCAL date (the day the
+    // device's clock shows), not by the UTC date. Everything here is derived
+    // from the runtime timezone, so the check holds in any TZ.
+    const events = [{ kickoffMs: kickoff, id: "se:darts:utc-boundary" }];
+    assert.equal(sportingEventsForLocalDay(events, { dayKey: "0", now: SE_NOW }).length, 1);
+    // And each local calendar day built on this machine's clock resolves to
+    // its own numeric dayKey: a 06:00 local kickoff N days away is kept on
+    // dayKey N and never leaks into "0". Past days are beyond the grace
+    // window, so their fixtures stay dropped (the scheduled-source rule).
+    for (const offset of [-3, -1, 1, 3]) {
+      const ref = new Date(SE_NOW);
+      ref.setDate(ref.getDate() + offset);
+      const at = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate(), 6, 0, 0).getTime();
+      assert.equal(
+        sportingEventsForLocalDay([{ kickoffMs: at, id: "k" }], { dayKey: String(offset), now: SE_NOW }).length,
+        offset >= 0 ? 1 : 0,
+        `offset ${offset}`
+      );
+      assert.equal(
+        sportingEventsForLocalDay([{ kickoffMs: at, id: "k" }], { dayKey: "0", now: SE_NOW }).length,
+        offset === 0 ? 1 : 0,
+        `offset ${offset} never leaks into the current local day`
+      );
+    }
+  });
+});
+
+describe("sporting-events.org: the day fetch — bounded budget, size guard, 6 h cache, failure isolation", () => {
+  function fourPayloads({ cricket = cricketPayloadText(), big = false } = {}) {
+    const { date_utc, time_utc } = utcPartsFor(SE_NOW);
+    const row = (slug, n) =>
+      JSON.stringify({
+        event_count: 1,
+        events: [{ match: `${slug}-${n}`, date_utc, time_utc, fixture: "A at B", home_team: "A", away_team: "B" }]
+      });
+    return {
+      "https://sporting-events.org/data/cricket.json": { text: big ? "x".repeat(64 * 1024 + 1) : cricket },
+      "https://sporting-events.org/data/darts.json": { text: row("darts", 1) },
+      "https://sporting-events.org/data/rugby-league.json": { text: row("rugby-league", 1) },
+      "https://sporting-events.org/data/snooker.json": { text: row("snooker", 1) }
+    };
+  }
+
+  test("the four slugs are fetched once and mapped into unified events for the visible local day", async () => {
+    clearSportingEventsCache();
+    const { impl, calls } = textFetch(fourPayloads());
+    const result = await sportingEventsForDay({ dayKey: "0", fetchImpl: impl, now: () => SE_NOW });
+    assert.equal(calls.length, 4, "exactly one request per slug");
+    assert.deepEqual(result.failedSlugs, []);
+    assert.equal(result.failed, 0);
+    assert.deepEqual(
+      result.events.map((ev) => ev.id).sort(),
+      [
+        "se:cricket:ind-vs-aus-1",
+        "se:darts:darts-1",
+        "se:rugby-league:rugby-league-1",
+        "se:snooker:snooker-1"
+      ]
+    );
+    assert.deepEqual(
+      SPORTING_EVENTS_SLUGS.map((entry) => entry.label).sort(),
+      result.events.map((ev) => ev.leagueName).sort()
+    );
+  });
+
+  test("the 6 h cache: a warm slug is never re-downloaded; after 6 h it revalidates", async () => {
+    clearSportingEventsCache();
+    const now = { t: SE_NOW };
+    const { impl, calls } = textFetch(fourPayloads());
+    await sportingEventsForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.equal(calls.length, 4);
+    now.t += 30 * 60 * 1000; // +30 min, well inside 6 h
+    const warm = await sportingEventsForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.equal(calls.length, 4, "a warm fixture cache makes zero requests");
+    assert.equal(warm.events.length, 4);
+    now.t += SPORTING_EVENTS_CACHE_TTL_MS + 1000; // past 6 h
+    await sportingEventsForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.equal(calls.length, 8, "after 6 h the slugs revalidate");
+  });
+
+  test("the 64 KB size guard: an oversized payload is skipped and LOGGED, never parsed", async () => {
+    clearSportingEventsCache();
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.map(String).join(" "));
+    try {
+      const { impl, calls } = textFetch(fourPayloads({ big: true }));
+      const result = await sportingEventsForDay({ dayKey: "0", fetchImpl: impl, now: () => SE_NOW });
+      assert.equal(calls.length, 4, "the oversized file was still requested once");
+      assert.deepEqual(result.failedSlugs, ["cricket"]);
+      assert.ok(!result.events.some((ev) => ev.id.startsWith("se:cricket:")), "the oversized payload contributed nothing");
+      assert.equal(result.events.length, 3, "the other three slugs still land");
+      assert.ok(
+        warnings.some((line) => line.includes("cricket") && /\d{4,}/.test(line)),
+        `the skip is logged with the slug and the size: ${JSON.stringify(warnings)}`
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+  });
+
+  test("a body of exactly 64 KB is accepted (only ABOVE the limit is skipped)", async () => {
+    clearSportingEventsCache();
+    const base = JSON.stringify({ events: [], pad: "" });
+    const deficit = SPORTING_EVENTS_MAX_BYTES - new TextEncoder().encode(base).length;
+    const exact = JSON.stringify({ events: [], pad: "x".repeat(deficit) });
+    assert.equal(new TextEncoder().encode(exact).length, SPORTING_EVENTS_MAX_BYTES);
+    const { impl } = textFetch({
+      "https://sporting-events.org/data/cricket.json": { text: exact },
+      "https://sporting-events.org/data/darts.json": { text: JSON.stringify({ events: [] }) },
+      "https://sporting-events.org/data/rugby-league.json": { text: JSON.stringify({ events: [] }) },
+      "https://sporting-events.org/data/snooker.json": { text: JSON.stringify({ events: [] }) }
+    });
+    const result = await sportingEventsForDay({ dayKey: "0", fetchImpl: impl, now: () => SE_NOW });
+    assert.deepEqual(result.failedSlugs, [], "64 KB exactly is inside the guard");
+  });
+
+  test("a failing file is isolated: the others still land, and the failure is NOT retried inside the TTL", async () => {
+    clearSportingEventsCache();
+    const now = { t: SE_NOW };
+    const byUrl = fourPayloads();
+    byUrl["https://sporting-events.org/data/cricket.json"] = { boom: true };
+    const { impl, calls } = textFetch(byUrl);
+    const first = await sportingEventsForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.deepEqual(first.failedSlugs, ["cricket"]);
+    assert.equal(first.failed, 1);
+    assert.equal(first.events.length, 3, "the failing file never poisons the others");
+    assert.ok(first.events.every((ev) => !ev.id.startsWith("se:cricket:")));
+    // A failure is remembered briefly: the screen's 60 s rounds never retry-loop.
+    now.t += 60 * 1000;
+    const second = await sportingEventsForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.equal(calls.length, 4, "the failed slug is not retried inside the failure TTL");
+    assert.deepEqual(second.failedSlugs, ["cricket"]);
+    assert.equal(second.events.length, 3);
+    now.t += SPORTING_EVENTS_FAILURE_TTL_MS + 1000;
+    await sportingEventsForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    assert.equal(
+      calls.length,
+      5,
+      "after the failure TTL exactly ONE new attempt (the failed slug); the warm successes never refetch"
+    );
+  });
+
+  test("a malformed JSON body is a failure, never a throw into the caller", async () => {
+    clearSportingEventsCache();
+    const byUrl = fourPayloads();
+    byUrl["https://sporting-events.org/data/snooker.json"] = { text: "<html>not json</html>" };
+    const { impl } = textFetch(byUrl);
+    const result = await sportingEventsForDay({ dayKey: "0", fetchImpl: impl, now: () => SE_NOW });
+    assert.deepEqual(result.failedSlugs, ["snooker"]);
+    assert.equal(result.events.length, 3);
+  });
+
+  test("no fetch available (node --test arms no default fetch): an honest failure, no network, no throw", async () => {
+    clearSportingEventsCache();
+    const result = await sportingEventsForDay({ dayKey: "0", now: () => SE_NOW });
+    assert.deepEqual(result.events, []);
+    assert.equal(result.failed, 4);
+    assert.deepEqual(result.failedSlugs, ["cricket", "darts", "rugby-league", "snooker"]);
+  });
+});
+
+describe("wiring: the second source appends after the ESPN paint and its failure never touches the ESPN list", () => {
+  const mountSource = readFileSync(
+    new URL("../js/ui/screens/sports/sportsScreenMethods-01-mount-and-load.js", import.meta.url),
+    "utf8"
+  );
+
+  test("loadSchedule fetches the secondary source AFTER the ESPN round painted", () => {
+    assert.match(mountSource, /sportingEventsForDay/);
+    const espnPaint = mountSource.indexOf("this.renderPartialNotice()");
+    const secondary = mountSource.indexOf("sportingEventsForDay(");
+    assert.ok(espnPaint >= 0, "the ESPN paint is in loadSchedule");
+    assert.ok(secondary > espnPaint, "the secondary fetch rides after the ESPN paint");
+    assert.match(mountSource, /this\.scheduleEvents\s*=\s*\[\.\.\.this\.scheduleEvents,\s*\.\.\.secondary\.events\]/);
+  });
+
+  test("a secondary failure is one muted line, guarded, with no retry loop", () => {
+    assert.match(mountSource, /sports-secondary-note/);
+    assert.match(mountSource, /fuente secundaria/i);
+    // The secondary load is wrapped so a throw can never break the ESPN render.
+    const start = mountSource.indexOf("try {", mountSource.indexOf("this.renderPartialNotice()"));
+    const catchIdx = mountSource.indexOf("} catch", start);
+    const secondaryIdx = mountSource.indexOf("sportingEventsForDay(");
+    assert.ok(start >= 0 && catchIdx > start && secondaryIdx > start && secondaryIdx < catchIdx, "the secondary load is inside the try");
+    // No polling/retry primitive appears anywhere in the screen's loader.
+    assert.doesNotMatch(mountSource, /setInterval/);
   });
 });
