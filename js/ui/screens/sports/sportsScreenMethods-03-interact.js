@@ -5,6 +5,7 @@ import * as internals from "./sportsScreen.js";
 // module; both are imported directly because sportsScreen.js re-exports only
 // the helpers the original layout contract pinned.
 import { probePlayableStreams } from "../../../core/sports/sportsFeed.js";
+import { resolveStreamsForEvent } from "../../../core/sports/espnSchedule.js";
 import { probeFailedNoticeText } from "./sportsScreenMethods-02-render.js";
 
 // Key handling, activation and stream resolution for the Sports screen.
@@ -55,8 +56,8 @@ export function createSportsScreenMethods03() {
     },
 
     headerRowCount() {
-      const sportCount = Array.isArray(this.sportChips) ? this.sportChips.length : 0;
-      return sportCount > 0 ? 2 : 1;
+      // Row 0: day chips + Actualizar. Row 1: the single filter pill.
+      return 2;
     },
 
     handleHorizontal(delta) {
@@ -75,7 +76,8 @@ export function createSportsScreenMethods03() {
         // day chips + Actualizar
         return 4;
       }
-      return Math.max(1, Array.isArray(this.sportChips) ? this.sportChips.length : 1);
+      // row 1: the single filter pill.
+      return 1;
     },
 
     handleVertical(delta) {
@@ -84,7 +86,7 @@ export function createSportsScreenMethods03() {
         if (nextRow < 0) return; // UP at the top row stays put
         if (nextRow >= this.headerRowCount()) {
           // DOWN from the last header row enters the list.
-          const rows = internals.buildMatchRows(this.sections, this.finishedExpanded, this.scores);
+          const rows = internals.buildMatchRows(this.sections, this.finishedExpanded);
           if (!rows.length) return;
           this.focusZone = "rows";
           this.clampRowIndex();
@@ -97,7 +99,7 @@ export function createSportsScreenMethods03() {
       }
       // Rows zone: one row per keypress. UP past the first row returns to the
       // header (the sport chips row when present, otherwise the day row).
-      const rows = internals.buildMatchRows(this.sections, this.finishedExpanded, this.scores);
+      const rows = internals.buildMatchRows(this.sections, this.finishedExpanded);
       if (!rows.length) return;
       if (delta < 0 && (this.rowIndex || 0) <= 0) {
         this.focusZone = "header";
@@ -123,13 +125,11 @@ export function createSportsScreenMethods03() {
           }
           return;
         }
-        const chip = (Array.isArray(this.sportChips) ? this.sportChips : [])[this.headerIndex];
-        if (chip) {
-          this.changeSport(chip.sportType);
-        }
+        // Row 1 is the filter pill: display-only (no other filter exists in
+        // this lightweight screen), Enter is a no-op.
         return;
       }
-      const rows = internals.buildMatchRows(this.sections, this.finishedExpanded, this.scores);
+      const rows = internals.buildMatchRows(this.sections, this.finishedExpanded);
       const row = rows[this.rowIndex || 0];
       if (!row) return;
       if (row.type === "header") {
@@ -149,14 +149,19 @@ export function createSportsScreenMethods03() {
       this.render();
     },
 
-    // Actualizar: one forced refresh, TTL ignored for this call.
+    // Actualizar: one forced refresh of BOTH sources, TTL ignored for this
+    // call (the addon pool and the ESPN schedule round both refetch).
     refresh() {
-      return this.loadEvents({ force: true });
+      this.loadAddonEvents({ force: true });
+      return this.loadSchedule({ force: true });
     },
 
-    // Enter on a match: resolve the stream (ONE attempt, no retries) and
-    //   ok        -> hand off to the player full screen (live HLS engine)
-    //   pending   -> inline notice with the retry hint; the row stays put
+    // Enter on a match: find the ONE addon event for this ESPN match (both
+    // team names + kickoff within 20 minutes) and resolve its stream. The
+    // addon is ONLY the link source — no addon match means there is nothing to
+    // play: the honest notice shows and NO player ever opens.
+    //   ok        -> probe before hand-off (below)
+    //   pending   -> inline notice with the retry hint; the card stays put
     //   error     -> the honest failure in the same notice area
     async resolveMatch(event) {
       const id = String(event?.id ?? "");
@@ -166,12 +171,19 @@ export function createSportsScreenMethods03() {
       this.resolvingId = id;
       this.showNotice(internals.SPORTS_RESOLVING_TEXT, { sticky: true });
 
-      const result = await sportsRepository.resolveStreams(id);
+      const resolution = await resolveStreamsForEvent(event, this.addonEvents, {
+        resolveStreams: (addonId) => sportsRepository.resolveStreams(addonId)
+      });
       this.resolvingId = "";
       this.clearNotice();
       if (Router.getCurrent() !== "sports") {
         return; // the screen was left while resolving
       }
+      if (!resolution) {
+        this.showNotice(internals.SPORTS_NO_LINK_TEXT);
+        return;
+      }
+      const result = resolution.result || { status: "error", detail: "" };
       if (result.status === "pending") {
         this.showNotice(internals.pendingNoticeText(result.retryAfterMs));
         return;

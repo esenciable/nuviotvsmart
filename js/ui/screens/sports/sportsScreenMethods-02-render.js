@@ -1,27 +1,28 @@
 /* eslint-disable no-unused-vars */
 import * as internals from "./sportsScreen.js";
-import { matchScore } from "../../../core/sports/espnScores.js";
 
-// Rendering for the lightweight Sports screen. Same rules as Live TV:
-//   - STATIC LAYOUT CONTRACT: every box has a fixed size; a focus move only
-//     toggles classes and calls node.focus() — no resize, no re-render, no
-//     per-keypress DOM measurement, no transition on the focus state at all.
-//   - NO IMAGES of any kind: no image nodes, no CSS background payloads, no logos. The
-//     team logos from the feed are never read (Samsung 120 MB app cap; all
-//     Live TV channel images were removed for exactly this reason).
-//   - One vertical list: EN VIVO -> PRÓXIMOS -> FINALIZADOS (collapsed by
-//     default). FINALIZADOS' header toggles it; the other headers are plain
-//     focusable labels so the flat focus order never depends on data.
+// Rendering for the rebuilt Sports screen — measured against the Android TV
+// reference app (SportsDesign.kt / SportsScreen.kt / SportsUi.kt, 1280x720,
+// scaled ×1.5 for this 1920x1080 surface; dp→px below).
+//
+// THE CARD: ONE structure for every state (pre/in/post) — league column,
+// two stacked team bands, right status column, chevron. Nothing may look like
+// a different component. The schedule comes from ESPN (espnSchedule.js); the
+// addon feed is ONLY the stream source.
+//
+//   STATIC LAYOUT CONTRACT: every box has a fixed size; a focus move only
+//   toggles classes and calls node.focus() — no resize, no re-render, no
+//   per-keypress DOM measurement. Focus scales the card 1.02 with a solid
+//   white border, instant — no transition (the border is always painted, so
+//   no size ever changes).
 //
 // Styles are inlined because the screen ships without a dedicated stylesheet.
-// Palette matches the Live TV screen: page #0D0D0D, focus fill #303030, 2px
-// white ring painted INSIDE, muted #808080, accent #F5C400.
 
-// Fixed geometry of a match row: 64px tile + 6px flex gap. The constant is
-// the layout contract — the row never grows with its content (long team names
-// clamp to one line inside the fixed tile).
-export const SPORTS_ROW_HEIGHT = 64;
-export const SPORTS_ROW_GAP = 6;
+// Fixed geometry of a match card: 86dp = 129px tall + 8dp = 12px gap. The
+// constant is the layout contract — the card never grows with its content
+// (long team names clamp to one line inside the fixed bands).
+export const SPORTS_ROW_HEIGHT = 129;
+export const SPORTS_ROW_GAP = 12;
 
 // The three day chips, in fixed order. Default selection: Hoy.
 export const SPORTS_DAY_CHIPS = [
@@ -31,27 +32,28 @@ export const SPORTS_DAY_CHIPS = [
 ];
 
 export const SPORTS_REFRESH_LABEL = "Actualizar";
-export const SPORTS_ALL_SPORTS_LABEL = "Todos";
+export const SPORTS_FILTER_PILL_LABEL = "Todos los eventos";
 
 // Honest-state copy. Never a blank panel, never a spinner that stays forever
-// (the feed fetch is bounded by a timeout).
+// (every fetch is bounded by a timeout).
 export const SPORTS_LOADING_TEXT = "Cargando partidos…";
 export const SPORTS_EMPTY_TEXT = "No hay partidos hoy";
 export const SPORTS_LOAD_ERROR_TEXT = "No se pudieron cargar los partidos";
 export const SPORTS_NO_SIGNAL_TEXT = "No hay señal para este partido";
 export const SPORTS_RESOLVING_TEXT = "Buscando señal…";
+// The addon has no event matching this ESPN match: the addon is ONLY the
+// stream source, so no match means there is nothing to play. Never open a
+// player without a link.
+export const SPORTS_NO_LINK_TEXT = "No hay enlace para este partido";
 
 // ESPN scored round cadence: one bounded round every 60 s, only while the
 // screen is mounted AND the document is visible (see methods-01). The cache
-// lives in espnScores.js; the timer here is a chained setTimeout — no
+// lives in espnSchedule.js; the timer here is a chained setTimeout — no
 // repeating interval primitive.
 export const SPORTS_SCORES_REFRESH_MS = 60000;
 
-// Source picker (several playable streams): a fixed panel over the list that
-// offers every playable source instead of silently playing the first.
-
 // Probe failure (the addon answered but NO stream URL actually serves the
-// playlist): the honest copy carries the count of streams tried. The row keeps
+// playlist): the honest copy carries the count of streams tried. The card keeps
 // its focus, so Enter retries the whole resolve+probe.
 export function probeFailedNoticeText(triedCount) {
   const count = Math.floor(Number(triedCount) || 0);
@@ -93,104 +95,271 @@ export function buildSourcePickerRows(streams) {
   }));
 }
 
-// The two team names (no logos). With both names: "A vs B"; otherwise the
-// event's own title; otherwise a neutral placeholder.
+// The two ESPN team names ("A vs B"), or a neutral placeholder.
 export function matchRowTitle(event) {
-  const names = (Array.isArray(event?.teams) ? event.teams : []).map((team) => String(team?.name ?? "").trim()).filter(Boolean);
-  if (names.length >= 2) {
-    return `${names[0]} vs ${names[1]}`;
-  }
-  const title = String(event?.title ?? "").trim();
-  return title || "Partido";
+  const home = String(event?.home?.name ?? "").trim();
+  const away = String(event?.away?.name ?? "").trim();
+  if (home && away) return `${home} vs ${away}`;
+  return home || away || "Partido";
 }
 
-// The score line: only when the match is live and the addon provides BOTH
-// numeric team scores. Never invented, never shown for scheduled matches.
-export function matchRowScore(event) {
-  if (!event?.live) return "";
-  const scores = (Array.isArray(event?.teams) ? event.teams : []).map((team) =>
-    Number.isFinite(Number(team?.score)) ? Number(team.score) : null
-  );
-  if (scores.length < 2 || scores[0] == null || scores[1] == null) return "";
-  return `${scores[0]} - ${scores[1]}`;
-}
+// Card helpers (measured spec) ----------------------------------------------
 
-// ESPN scored-row helpers (reference layout) -------------------------------
-
-// Period ordinal like the reference app shows it: 4th · 15:00.
+// Spanish period ordinal like the reference app shows it: 4º · 3:47.
 export function periodOrdinal(period) {
   const p = Math.floor(Number(period) || 0);
   if (p <= 0) return "";
-  const rem = p % 10;
-  const rem100 = p % 100;
-  const suffix = rem === 1 && rem100 !== 11 ? "st" : rem === 2 && rem100 !== 12 ? "nd" : rem === 3 && rem100 !== 13 ? "rd" : "th";
-  return `${p}${suffix}`;
+  return `${p}º`;
 }
 
 export function formatPeriodClock(period, clock) {
   return [periodOrdinal(period), String(clock ?? "").trim()].filter(Boolean).join(" · ");
 }
 
-// The status block's content from the merged game: red ● EN VIVO with the
-// period · clock under it while live, FINAL when finished, the local kickoff
-// time otherwise.
-export function scoreStatusView(game) {
-  const state = String(game?.state ?? "");
+// Countdown for a scheduled match, only while the start is under 6 h away:
+// "en 12 min" / "en 1 h 51" / "en 2 h". Otherwise "" (the line stays empty).
+export function countdownText(kickoffMs, now = Date.now()) {
+  const kickoff = Number(kickoffMs);
+  if (!Number.isFinite(kickoff) || kickoff <= Number(now)) return "";
+  const minutes = Math.round((kickoff - Number(now)) / 60000);
+  if (minutes >= 360) return "";
+  if (minutes < 60) return `en ${Math.max(1, minutes)} min`;
+  const hours = Math.floor(minutes / 60);
+  const rem = minutes % 60;
+  return rem ? `en ${hours} h ${rem}` : `en ${hours} h`;
+}
+
+// Progress fraction, honestly computable or null. Elapsed share of the game
+// from the period number against the league's known period count: football and
+// basketball 4 quarters, hockey 3 periods, soccer 2 halves, baseball 9
+// innings. Sports without a period count (golf, tennis, racing, boxing…) have
+// NO bar — an invented fraction would be a meaningless number, the exact
+// complaint this rebuild answers.
+const PERIOD_COUNTS = {
+  football: 4,
+  basketball: 4,
+  hockey: 3,
+  baseball: 9,
+  soccer: 2
+};
+
+export function liveProgressFraction(event) {
+  if (String(event?.state ?? "") !== "in") return null;
+  const total = PERIOD_COUNTS[String(event?.sportType ?? "")];
+  if (!total) return null;
+  const period = Math.floor(Number(event?.period) || 0);
+  if (period <= 0) return 0;
+  return Math.max(0, Math.min(1, period / total));
+}
+
+// Status ordinal for POSTPONED / CANCELLED / SUSPENDED style ESPN payloads:
+// the state is still "pre" but the shortDetail names the disruption.
+const OFF_STATUS_PATTERN = /postpon|cancel|suspend|suspendido|pospuesto|cancelado|aplazad|retrasad/i;
+
+// The status column's content from the unified event. Same column, every
+// state: live → red ● EN VIVO + period · clock; post → FINAL + the kickoff
+// time; pre → the local kickoff time + the countdown (under 6 h only); an
+// ESPN off-status → the status in caps.
+export function scoreStatusView(event, now = Date.now()) {
+  const state = String(event?.state ?? "");
+  const statusText = String(event?.statusText ?? "").trim();
+  if (state !== "in" && statusText && OFF_STATUS_PATTERN.test(statusText)) {
+    return {
+      kind: "off",
+      badge: statusText.toUpperCase(),
+      badgeClass: "sports-status-badge is-off",
+      main: "",
+      sub: "",
+      situation: "",
+      progress: null
+    };
+  }
   if (state === "in") {
     return {
       kind: "live",
-      main: "● EN VIVO",
-      sub: formatPeriodClock(game?.period, game?.clock),
-      situation: String(game?.situation ?? "")
+      badge: "● EN VIVO",
+      badgeClass: "sports-status-badge is-live",
+      main: formatPeriodClock(event?.period, event?.clock),
+      sub: "",
+      // The down/distance line is a FOOTBALL thing: ESPN only provides it for
+      // football, and the reference app only shows it there.
+      situation: String(event?.sportType ?? "") === "football" ? String(event?.situation ?? "").trim() : "",
+      progress: liveProgressFraction(event)
     };
   }
   if (state === "post") {
-    return { kind: "final", main: "FINAL", sub: "", situation: "" };
+    return {
+      kind: "final",
+      badge: "FINAL",
+      badgeClass: "sports-status-badge is-final",
+      main: internals.formatKickoffTime(event?.kickoffMs) || "",
+      sub: "",
+      situation: "",
+      progress: null
+    };
   }
   return {
     kind: "time",
-    main: internals.formatKickoffTime(game?.kickoffMs) || "--:--",
+    badge: internals.formatKickoffTime(event?.kickoffMs) || "--:--",
+    badgeClass: "sports-status-badge is-time",
+    main: countdownText(event?.kickoffMs, now),
     sub: "",
-    situation: ""
+    situation: "",
+    progress: null
   };
 }
 
-// The scored row's inner markup (reference layout, NO images): two lines, one
-// per team — name left, its record in muted small text, the score right-
-// aligned in a large tabular figure — and a small status block at the right.
-// The down/distance line renders only for LIVE football (ESPN only provides
-// situation for football, and only while the game is in progress). Away is
-// the top line, home the bottom (broadcast order).
-export function renderScoredRowInner(game) {
+// Band gradient colour: the team colour darkened toward #0B0C10 — lerp 0.50
+// when the colour is light, 0.25 mid, 0.08 dark (relative luminance). A
+// missing or invalid colour falls back to #3A4150, never yellow, never NaN.
+const BAND_FALLBACK_COLOR = "#3A4150";
+const BAND_DARK_ANCHOR = { r: 0x0b, g: 0x0c, b: 0x10 };
+
+function hexToRgb(hex) {
+  const raw = String(hex ?? "")
+    .trim()
+    .replace(/^#/, "");
+  const full =
+    raw.length === 3
+      ? raw
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : raw;
+  if (!/^[0-9a-fA-F]{6}$/.test(full)) return null;
+  return {
+    r: parseInt(full.slice(0, 2), 16),
+    g: parseInt(full.slice(2, 4), 16),
+    b: parseInt(full.slice(4, 6), 16)
+  };
+}
+
+function relativeLuminance({ r, g, b }) {
+  return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+}
+
+function lerp(a, b, t) {
+  return Math.round(a + (b - a) * t);
+}
+
+// The darkened base colour of a team band: lerp(teamColour, #0B0C10, t).
+export function bandBaseColor(color) {
+  const rgb = hexToRgb(color);
+  if (!rgb) return BAND_FALLBACK_COLOR;
+  const lum = relativeLuminance(rgb);
+  const t = lum > 0.6 ? 0.5 : lum > 0.25 ? 0.25 : 0.08;
+  return `#${[rgb.r, rgb.g, rgb.b]
+    .map((c, i) => lerp(c, [BAND_DARK_ANCHOR.r, BAND_DARK_ANCHOR.g, BAND_DARK_ANCHOR.b][i], t))
+    .map((c) => c.toString(16).padStart(2, "0"))
+    .join("")}`.toUpperCase();
+}
+
+// The band's horizontal gradient: team base colour alpha .92 at 0%, .28 at
+// 70%, .05 at 100% (the reference card's tint dies toward the right edge).
+export function bandGradient(color) {
+  const base = hexToRgb(bandBaseColor(color));
+  if (!base) return BAND_FALLBACK_COLOR; // solid fallback, no gradient
+  const rgba = (alpha) => `rgba(${base.r}, ${base.g}, ${base.b}, ${alpha})`;
+  return `linear-gradient(90deg, ${rgba(0.92)} 0%, ${rgba(0.28)} 70%, ${rgba(0.05)} 100%)`;
+}
+
+// Up to two uppercase initials from the team name — the fallback mark when
+// ESPN provides no logo.
+export function teamInitials(name) {
+  const words = String(name ?? "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length) return "";
+  return words
+    .slice(0, 2)
+    .map((word) => word[0].toUpperCase())
+    .join("");
+}
+
+// Is this side the trailing team (a leader exists and this side has fewer
+// points)? Tied or scoreless games have no trailing side.
+function isTrailing(side, other) {
+  if (side?.score == null || other?.score == null) return false;
+  return side.score < other.score;
+}
+
+// ONE card for every state. Structure, left to right:
+//   league column (72px, fixed) → team bands (flex, two stacked) →
+//   status column (177px, fixed) → chevron.
+// Home band on top (broadcast order comes from the reference app: the HOME
+// team leads the card), away below. The HOME/away sides are derived from
+// ESPN's homeAway, never from payload order.
+export function renderMatchCard(event, index) {
   const esc = internals.escapeHtml;
-  const teamLine = (team) => `
-        <div class="sports-score-line">
-          <span class="sports-score-team">${esc(team?.name || "—")}</span>
-          ${team?.record ? `<span class="sports-score-record">${esc(team.record)}</span>` : ""}
-          <span class="sports-score-figure">${team?.score == null ? "–" : esc(String(team.score))}</span>
+  const status = scoreStatusView(event);
+  const home = event?.home ?? {};
+  const away = event?.away ?? {};
+
+  const band = (side, other) => {
+    // The gradient ALWAYS applies; a missing/invalid team colour only falls
+    // back to the measured #3A4150 base. Never yellow, never NaN.
+    const background = `background: ${bandGradient(side?.color)};`;
+    const trailing = isTrailing(side, other);
+    const nameClass = trailing ? "sports-team-name is-trailing" : "sports-team-name";
+    const scoreClass = trailing ? "sports-team-score is-trailing" : "sports-team-score";
+    const logo = String(side?.logo ?? "").trim();
+    const initials = teamInitials(side?.name);
+    const logoContent = logo
+      ? `<img class="sports-team-logo" src="${esc(logo)}" alt="" onerror="this.style.display='none'" />`
+      : initials
+        ? `<span class="sports-team-logo-fallback">${esc(initials)}</span>`
+        : "";
+    // A PRE-game score slot stays EMPTY even when ESPN carries a 0: a game
+    // that has not started has no score, and a meaningless digit is exactly
+    // the complaint this rebuild answers.
+    const showScore = String(event?.state ?? "") !== "pre" && side?.score != null;
+    const scoreValue = showScore ? esc(String(side.score)) : "";
+    const record = String(side?.record ?? "").trim();
+    return `
+        <div class="sports-team-band" style="${background}">
+          <span class="sports-team-logo-box">${logoContent}</span>
+          <span class="sports-team-text">
+            <span class="${nameClass}">${esc(side?.name || "—")}</span>
+            ${record ? `<span class="sports-team-record">récord ${esc(record)}</span>` : ""}
+          </span>
+          <span class="${scoreClass}">${scoreValue}</span>
         </div>`;
-  const status = scoreStatusView(game);
+  };
+
+  const leagueMark = String(event?.leagueLogo ?? "").trim()
+    ? `<img class="sports-league-logo" src="${esc(event.leagueLogo)}" alt="" onerror="this.style.display='none'" />`
+    : `<span class="sports-league-abbr">${esc(event?.leagueAbbr || event?.slug || "")}</span>`;
+
   const situationLine =
     status.kind === "live" && status.situation ? `<span class="sports-status-situation">${esc(status.situation)}</span>` : "";
+  const progressLine =
+    status.progress != null
+      ? `<span class="sports-status-progress"><span class="sports-status-progress-fill" style="width: ${Math.round(status.progress * 100)}%"></span></span>`
+      : "";
+
   return `
-        <div class="sports-row-scored-main">
-          ${teamLine(game?.away)}
-          ${teamLine(game?.home)}
+      <div class="sports-row focusable" role="button"
+           data-row-index="${index}" data-row-type="match" data-event-id="${esc(event?.id ?? "")}">
+        <div class="sports-league-col">${leagueMark}</div>
+        <div class="sports-bands">
+          ${band(home, away)}
+          ${band(away, home)}
         </div>
-        <div class="sports-row-status is-${esc(status.kind)}">
-          <span class="sports-status-main${status.kind === "live" ? " sports-live-badge" : ""}">${esc(status.main)}</span>
-          ${status.sub ? `<span class="sports-status-sub">${esc(status.sub)}</span>` : ""}
+        <div class="sports-row-status">
+          <span class="${status.badgeClass}">${esc(status.badge)}</span>
+          ${status.main ? `<span class="sports-status-main">${esc(status.main)}</span>` : ""}
           ${situationLine}
-        </div>`;
+          ${progressLine}
+        </div>
+        <span class="sports-row-chevron">›</span>
+      </div>`;
 }
 
 // Flat focus model for the list: one entry per focusable row, in paint order
 // — every section header (focusable so the order never depends on data),
-// then its match rows. FINALIZADOS contributes match rows only when expanded.
-// `scores` (the day's ESPN games, optional) are merged per row via the TV
-// app's match rule: a match with NO counterpart keeps score null and renders
-// exactly as before — never a blank or a zero.
-export function buildMatchRows(sections, finishedExpanded, scores = null) {
+// then its match cards. FINALIZADOS contributes cards only when expanded.
+export function buildMatchRows(sections, finishedExpanded) {
   const rows = [];
   for (const section of Array.isArray(sections) ? sections : []) {
     const key = String(section?.key ?? "");
@@ -205,7 +374,7 @@ export function buildMatchRows(sections, finishedExpanded, scores = null) {
     });
     if (!collapsed) {
       for (const event of Array.isArray(section?.events) ? section.events : []) {
-        rows.push({ type: "match", sectionKey: key, event, score: matchScore(event, scores) });
+        rows.push({ type: "match", sectionKey: key, event });
       }
     }
   }
@@ -213,64 +382,91 @@ export function buildMatchRows(sections, finishedExpanded, scores = null) {
 }
 
 export function createSportsScreenMethods02() {
-  const { ScreenUtils, escapeHtml, formatKickoffTime } = internals;
+  const { ScreenUtils, escapeHtml } = internals;
 
   const STYLE = `
     <style id="sports-screen-style">
-      /* STATIC LAYOUT CONTRACT: fixed sizes everywhere; focus only toggles a
-         class (fill + inner ring) — no scale, no layout change, no transition. */
-      .sports-shell { position: absolute; inset: 0; width: 100%; height: 100%; display: flex; flex-direction: column; background: #0D0D0D; color: #FFFFFF; overflow: hidden; }
+      /* Measured from the Android TV reference (dp × 1.5). STATIC LAYOUT
+         CONTRACT: fixed sizes everywhere; focus toggles the border colour and
+         scales 1.02 — no transition, no layout change. NO YELLOW ANYWHERE. */
+      .sports-shell { position: absolute; inset: 0; width: 100%; height: 100%; display: flex; flex-direction: column; background: #0B0B0B; color: #FFFFFF; overflow: hidden; }
+      /* Header glow: a 330px lit wash above the content — vertical #1A1A1A
+         fade plus two soft radial #F5F5F5 washes (the reference's lit look). */
+      .sports-glow { position: absolute; top: 0; left: 0; right: 0; height: 330px; pointer-events: none;
+        background:
+          radial-gradient(ellipse 60% 100% at 20% 0%, rgba(245,245,245,0.08), transparent 70%),
+          radial-gradient(ellipse 60% 100% at 80% 0%, rgba(245,245,245,0.032), transparent 70%),
+          linear-gradient(180deg, rgba(26,26,26,0.85), rgba(26,26,26,0)); }
       /* HEADER ---------------------------------------------------------------- */
-      .sports-header { flex-shrink: 0; padding: 20px 36px 14px 84px; box-sizing: border-box; }
-      .sports-title { font-size: 42px; line-height: 48px; height: 48px; font-weight: 800; }
-      .sports-day-row { display: flex; align-items: center; gap: 12px; margin-top: 14px; height: 51px; }
-      .sports-chip { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; height: 51px; padding: 0 24px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 15px; outline: 2px solid transparent; outline-offset: -2px; font-size: 19.5px; line-height: 24px; font-weight: 600; color: #B3B3B3; cursor: pointer; box-sizing: border-box; white-space: nowrap; }
-      .sports-chip.focused { outline-color: #FFFFFF; background: #303030; color: #FFFFFF; }
-      .sports-chip.is-selected { box-shadow: inset 0 0 0 1px rgba(245,196,0,0.9); color: #F5C400; }
-      .sports-refresh { margin-left: auto; color: #B3B3B3; }
-      .sports-sport-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; height: 51px; overflow-x: auto; overflow-y: hidden; scroll-behavior: auto; }
+      .sports-header { flex-shrink: 0; position: relative; padding: 30px 54px 0 84px; box-sizing: border-box; }
+      .sports-title { font-size: 39px; line-height: 48px; height: 48px; font-weight: 900; color: #FFFFFF; white-space: nowrap; }
+      .sports-day-row { display: flex; align-items: center; gap: 6px; margin-top: 10px; height: 45px; }
+      .sports-chip { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; height: 45px; padding: 0 18px; background: transparent; border: 2.25px solid transparent; border-radius: 22.5px; outline: none; font-size: 18px; line-height: 24px; font-weight: 700; color: #8B90A0; cursor: pointer; box-sizing: border-box; white-space: nowrap; }
+      .sports-chip.focused { border-color: #FFFFFF; }
+      .sports-chip.is-selected { background: rgba(245,245,245,0.14); border-color: rgba(245,245,245,1); color: #FFFFFF; }
+      .sports-refresh { margin-left: auto; }
+      /* The single filter pill: fixed 48px, icon + label. */
+      .sports-filter-row { display: flex; align-items: center; margin-top: 10px; height: 48px; }
+      .sports-filter-pill { flex-shrink: 0; display: inline-flex; align-items: center; gap: 9px; height: 48px; padding: 0 18px; background: rgba(30,33,44,0.678); border: 1.5px solid rgba(255,255,255,0.20); border-radius: 24px; outline: none; font-size: 18px; line-height: 24px; font-weight: 800; color: #FFFFFF; cursor: pointer; box-sizing: border-box; white-space: nowrap; }
+      .sports-filter-icon { font-size: 18px; }
+      .sports-filter-pill.focused { background: rgba(40,44,58,0.722); border: 3px solid #FFFFFF; }
+      .sports-filter-count { color: #8B90A0; font-weight: 700; }
       /* LIST ------------------------------------------------------------------ */
-      .sports-list { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; scroll-behavior: auto; padding: 6px 36px 24px 84px; display: flex; flex-direction: column; gap: 6px; box-sizing: border-box; }
-      .sports-section-header { flex-shrink: 0; display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 15px; outline: 2px solid transparent; outline-offset: -2px; font-size: 19.5px; line-height: 24px; font-weight: 700; color: #F5C400; letter-spacing: 0.06em; cursor: pointer; box-sizing: border-box; }
-      .sports-section-header.focused { outline-color: #FFFFFF; background: #303030; }
-      .sports-section-count { color: #808080; font-weight: 500; }
-      .sports-section-chevron { color: #808080; }
-      .sports-row { flex-shrink: 0; display: flex; align-items: center; gap: 14px; height: 64px; background: rgba(13,13,13,0.66); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 18px; padding: 0 15px; outline: 2px solid transparent; outline-offset: -2px; cursor: pointer; box-sizing: border-box; overflow: hidden; }
-      .sports-row.focused { outline-color: #FFFFFF; background: #303030; }
-      .sports-row-time { flex-shrink: 0; width: 110px; font-size: 19.5px; line-height: 24px; font-weight: 700; color: #FFFFFF; }
-      .sports-row-time.is-live { color: #FF6B5E; font-size: 15px; letter-spacing: 0.04em; }
-      .sports-row-main { flex: 1; min-width: 0; min-height: 0; }
-      .sports-row-league { font-size: 15px; line-height: 18px; height: 18px; color: #808080; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .sports-row-teams { font-size: 21px; line-height: 26px; height: 26px; margin-top: 2px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .sports-row-score { flex-shrink: 0; min-width: 64px; text-align: right; font-size: 24px; line-height: 28px; font-weight: 800; color: #F5C400; font-variant-numeric: tabular-nums; }
-      /* SCORED ROW (ESPN): the reference layout — two team lines (name left,
-         muted record, big right-aligned tabular figure) plus a small status
-         block. Same fixed 64px row; no images, no transitions. */
-      .sports-row-scored-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-      .sports-score-line { display: flex; align-items: baseline; gap: 8px; height: 24px; min-width: 0; }
-      .sports-score-team { flex: 0 1 auto; min-width: 0; font-size: 19px; line-height: 24px; font-weight: 700; color: #FFFFFF; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .sports-score-record { flex-shrink: 0; font-size: 13px; line-height: 24px; color: #808080; }
-      .sports-score-figure { flex-shrink: 0; width: 64px; text-align: right; font-size: 27px; line-height: 24px; font-weight: 800; color: #FFFFFF; font-variant-numeric: tabular-nums; }
-      .sports-row-status { flex-shrink: 0; width: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; overflow: hidden; }
-      .sports-status-main { font-size: 15px; line-height: 18px; font-weight: 700; color: #808080; white-space: nowrap; }
-      .sports-status-main.sports-live-badge { color: #FF6B5E; letter-spacing: 0.04em; }
-      .sports-status-sub { font-size: 13px; line-height: 16px; color: #B3B3B3; white-space: nowrap; }
-      .sports-status-situation { font-size: 12px; line-height: 15px; max-width: 100%; color: #808080; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .sports-state { display: flex; align-items: center; color: #808080; font-size: 19.5px; padding: 20px 4px; }
-      .sports-state.is-error { color: #ffb4a8; overflow-wrap: anywhere; }
+      .sports-list { flex: 1; min-height: 0; min-width: 0; overflow-y: auto; scroll-behavior: auto; padding: 6px 54px 39px 84px; display: flex; flex-direction: column; gap: 12px; box-sizing: border-box; }
+      .sports-section-header { flex-shrink: 0; display: flex; align-items: center; gap: 10.5px; height: 44px; padding: 0; outline: 2px solid transparent; outline-offset: -2px; font-size: 16.5px; line-height: 22px; font-weight: 900; color: #C9CCD6; letter-spacing: 0.06em; cursor: pointer; box-sizing: border-box; }
+      .sports-section-header .sports-live-dot { width: 12px; height: 12px; border-radius: 50%; background: #E53935; flex-shrink: 0; }
+      .sports-section-header.is-live-section { color: #FFFFFF; }
+      .sports-section-header.focused { outline-color: #FFFFFF; }
+      .sports-section-count { margin-left: auto; color: #8B90A0; font-weight: 700; }
+      .sports-section-chevron { color: #8B90A0; }
+      /* THE CARD: one structure for every state. Height 129px (86dp), radius
+         21px (14dp), glass background, 1.5px white@0.20 border INSIDE — the
+         border is always painted so focus never changes the size. */
+      .sports-row { position: relative; flex-shrink: 0; display: flex; align-items: stretch; height: 129px; background: rgba(30,33,44,0.678); border: 1.5px solid rgba(255,255,255,0.20); border-radius: 21px; cursor: pointer; box-sizing: border-box; overflow: hidden; outline: none; }
+      .sports-row.focused { border-color: #FFFFFF; transform: scale(1.02); }
+      .sports-league-col { flex-shrink: 0; width: 72px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.03); border-right: 1.5px solid rgba(255,255,255,0.08); }
+      .sports-league-logo { width: 42px; height: 42px; object-fit: contain; }
+      .sports-league-abbr { font-size: 16.5px; font-weight: 900; color: #8B90A0; text-transform: uppercase; }
+      .sports-bands { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+      /* TEAM BAND: horizontal team-colour gradient (inline), logo box, name +
+         record stacked, big right-aligned tabular score. ~64.5px each. */
+      .sports-team-band { flex: 1; min-height: 0; display: flex; align-items: center; gap: 13.5px; padding: 0 9px 0 13.5px; min-width: 0; }
+      .sports-team-logo-box { position: relative; flex-shrink: 0; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; background: radial-gradient(circle at 50% 50%, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.16) 43%, rgba(255,255,255,0) 44%); }
+      .sports-team-logo { width: 45px; height: 45px; object-fit: contain; }
+      .sports-team-logo-fallback { width: 38.7px; height: 38.7px; display: flex; align-items: center; justify-content: center; border: 2.25px solid rgba(255,255,255,0.85); border-radius: 50%; font-size: 11.7px; font-weight: 900; color: #FFFFFF; box-sizing: border-box; }
+      .sports-team-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+      .sports-team-name { font-size: 19.5px; line-height: 24px; font-weight: 800; color: #FFFFFF; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .sports-team-name.is-trailing { color: rgba(255,255,255,0.75); }
+      .sports-team-record { font-size: 13.3px; line-height: 17px; font-weight: 600; color: rgba(255,255,255,0.6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .sports-team-score { flex-shrink: 0; min-width: 40px; padding: 0 7.5px; text-align: right; font-size: 33px; line-height: 36px; font-weight: 900; color: #FFFFFF; font-variant-numeric: tabular-nums; }
+      .sports-team-score.is-trailing { color: rgba(255,255,255,0.50); }
+      /* STATUS COLUMN: 177px fixed, left divider, vertically centred. */
+      .sports-row-status { flex-shrink: 0; width: 177px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 4.5px; border-left: 1.5px solid rgba(255,255,255,0.08); padding: 0 30px 0 16.5px; box-sizing: border-box; overflow: hidden; }
+      .sports-status-badge { display: inline-flex; align-items: center; max-width: 100%; border-radius: 7.5px; padding: 2.25px 9px; font-size: 13.5px; line-height: 18px; font-weight: 900; color: #FFFFFF; white-space: nowrap; }
+      .sports-status-badge.is-live { background: #E53935; }
+      .sports-status-badge.is-time { background: rgba(255,255,255,0.10); }
+      .sports-status-badge.is-final { background: rgba(255,255,255,0.12); }
+      .sports-status-badge.is-off { background: rgba(255,138,128,0.20); color: #FF8A80; }
+      .sports-status-main { font-size: 18px; line-height: 24px; font-weight: 900; color: #FFFFFF; white-space: nowrap; }
+      .sports-status-situation { max-width: 100%; font-size: 13.5px; line-height: 18px; color: #AAB0BE; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .sports-status-progress { width: 100%; height: 4.5px; border-radius: 3px; background: rgba(255,255,255,0.14); overflow: hidden; }
+      .sports-status-progress-fill { display: block; height: 100%; border-radius: 3px; background: #E53935; }
+      .sports-row-chevron { flex-shrink: 0; align-self: center; padding-right: 10.5px; font-size: 24px; line-height: 28px; color: #8B90A0; }
+      .sports-state { display: flex; align-items: center; color: #8B90A0; font-size: 19.5px; padding: 20px 4px; }
+      .sports-state.is-error { color: #FF8A80; overflow-wrap: anywhere; }
       /* Inline notice (pending / resolve failure): patched in place, the list
          and its focus stay exactly where they are. */
-      .sports-notice { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%); max-width: 70%; background: rgba(13,13,13,0.95); border: 1px solid #333333; border-radius: 10px; padding: 12px 18px; font-size: 15px; color: #FFFFFF; overflow-wrap: anywhere; z-index: 2; }
+      .sports-notice { position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%); max-width: 70%; background: rgba(11,11,11,0.95); border: 1px solid #333333; border-radius: 10px; padding: 12px 18px; font-size: 15px; color: #FFFFFF; overflow-wrap: anywhere; z-index: 2; }
       /* SOURCE PICKER: a fixed panel over the list; same focus rules as the
-         rows — class toggle + native focus, no animation, no images. */
-      .sports-picker { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 640px; max-height: 480px; display: flex; flex-direction: column; background: rgba(13,13,13,0.97); border: 1px solid #333333; border-radius: 18px; padding: 20px; box-sizing: border-box; overflow: hidden; z-index: 3; }
-      .sports-picker-title { flex-shrink: 0; height: 28px; font-size: 21px; line-height: 28px; font-weight: 800; color: #F5C400; }
+         cards — class toggle + native focus, no animation. */
+      .sports-picker { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 640px; max-height: 480px; display: flex; flex-direction: column; background: rgba(11,11,11,0.97); border: 1px solid #333333; border-radius: 18px; padding: 20px; box-sizing: border-box; overflow: hidden; z-index: 3; }
+      .sports-picker-title { flex-shrink: 0; height: 28px; font-size: 21px; line-height: 28px; font-weight: 900; color: #FFFFFF; }
       .sports-picker-list { flex: 1; min-height: 0; overflow-y: auto; scroll-behavior: auto; display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
       .sports-picker-option { flex-shrink: 0; display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 15px; background: rgba(255,255,255,0.04); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10); border-radius: 14px; outline: 2px solid transparent; outline-offset: -2px; cursor: pointer; box-sizing: border-box; overflow: hidden; font-size: 19.5px; line-height: 24px; color: #FFFFFF; white-space: nowrap; }
-      .sports-picker-option.focused { outline-color: #FFFFFF; background: #303030; }
+      .sports-picker-option.focused { outline-color: #FFFFFF; background: rgba(40,44,58,0.722); }
       .sports-picker-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 700; }
-      .sports-picker-resolution { flex-shrink: 0; color: #808080; font-weight: 600; }
-      .sports-picker-unverified { flex-shrink: 0; color: #FF6B5E; font-size: 15px; }
+      .sports-picker-resolution { flex-shrink: 0; color: #8B90A0; font-weight: 600; }
+      .sports-picker-unverified { flex-shrink: 0; color: #FF8A80; font-size: 15px; }
     </style>
   `;
 
@@ -284,21 +480,9 @@ export function createSportsScreenMethods02() {
     `;
   }
 
-  function renderSportChip(chip, index) {
-    const selected = (this.sportType || null) === (chip.sportType || null) ? " is-selected" : "";
-    return `
-      <div class="sports-chip focusable${selected}" role="button"
-           data-header-row="1" data-chip-index="${index}" data-sport="${escapeHtml(chip.id)}">
-        ${escapeHtml(chip.label)}
-      </div>
-    `;
-  }
-
   function renderHeader() {
     const dayChips = internals.SPORTS_DAY_CHIPS.map((chip, index) => renderDayChip.call(this, chip, index)).join("");
-    const sportChips = (Array.isArray(this.sportChips) ? this.sportChips : [])
-      .map((chip, index) => renderSportChip.call(this, chip, index))
-      .join("");
+    const liveCount = Array.isArray(this.scheduleEvents) ? this.scheduleEvents.filter((event) => event?.state === "in").length : 0;
     return `
       <div class="sports-header">
         <div class="sports-title">${escapeHtml("Deportes")}</div>
@@ -309,41 +493,20 @@ export function createSportsScreenMethods02() {
             ${escapeHtml(internals.SPORTS_REFRESH_LABEL)}
           </div>
         </div>
-        <div class="sports-sport-row">${sportChips}</div>
+        <div class="sports-filter-row">
+          <div class="sports-filter-pill focusable" role="button"
+               data-header-row="1" data-chip-index="0" data-action="filter">
+            <span class="sports-filter-icon">⚙</span>
+            <span>${escapeHtml(internals.SPORTS_FILTER_PILL_LABEL)}</span>
+            <span class="sports-filter-count">· ${liveCount} en vivo</span>
+          </div>
+        </div>
       </div>
     `;
   }
 
   function renderMatchRow(row, index) {
-    const event = row.event || {};
-    // A merged ESPN score switches the row to the reference layout (two team
-    // lines + status block). A match with no counterpart keeps today's row
-    // EXACTLY as it is — no score, no badge, never a blank or a zero.
-    if (row.score) {
-      return `
-      <div class="sports-row focusable" role="button"
-           data-row-index="${index}" data-row-type="match" data-event-id="${escapeHtml(event.id ?? "")}">
-        ${renderScoredRowInner(row.score)}
-      </div>
-    `;
-    }
-    const live = event.live === true || event.status === "live";
-    const lead = live
-      ? `<span class="sports-row-time is-live">EN VIVO</span>`
-      : `<span class="sports-row-time">${escapeHtml(formatKickoffTime(event.kickoffMs) || "--:--")}</span>`;
-    const league = escapeHtml(String(event.leagueName ?? "").trim());
-    const score = escapeHtml(matchRowScore(event));
-    return `
-      <div class="sports-row focusable" role="button"
-           data-row-index="${index}" data-row-type="match" data-event-id="${escapeHtml(event.id ?? "")}">
-        ${lead}
-        <div class="sports-row-main">
-          <div class="sports-row-league">${league}</div>
-          <div class="sports-row-teams">${escapeHtml(matchRowTitle(event))}</div>
-        </div>
-        ${score ? `<div class="sports-row-score">${score}</div>` : ""}
-      </div>
-    `;
+    return renderMatchCard(row.event, index);
   }
 
   function renderSourcePicker(picker) {
@@ -375,7 +538,7 @@ export function createSportsScreenMethods02() {
     if (this.error) {
       return `<div class="sports-state is-error">${escapeHtml(`${internals.SPORTS_LOAD_ERROR_TEXT}: ${this.error}`)}</div>`;
     }
-    const rows = buildMatchRows(this.sections, this.finishedExpanded, this.scores);
+    const rows = buildMatchRows(this.sections, this.finishedExpanded);
     const hasMatches = rows.some((row) => row.type === "match");
     if (!hasMatches) {
       return `<div class="sports-state">${escapeHtml(internals.SPORTS_EMPTY_TEXT)}</div>`;
@@ -383,11 +546,13 @@ export function createSportsScreenMethods02() {
     return rows
       .map((row, index) => {
         if (row.type === "header") {
+          const liveDot = row.sectionKey === "live" ? `<span class="sports-live-dot"></span>` : "";
+          const liveClass = row.sectionKey === "live" ? " is-live-section" : "";
           const chevron = row.collapsible ? `<span class="sports-section-chevron">${row.collapsed ? "▸" : "▾"}</span>` : "";
           return `
-            <div class="sports-section-header focusable" role="button"
+            <div class="sports-section-header focusable${liveClass}" role="button"
                  data-row-index="${index}" data-row-type="header" data-section-key="${escapeHtml(row.sectionKey)}">
-              ${escapeHtml(row.label)} <span class="sports-section-count">(${row.count})</span> ${chevron}
+              ${liveDot}${escapeHtml(row.label)} <span class="sports-section-count">${row.count} partidos</span> ${chevron}
             </div>
           `;
         }
@@ -402,6 +567,7 @@ export function createSportsScreenMethods02() {
         this.container.innerHTML = `
           ${STYLE}
           <div class="sports-shell">
+            <div class="sports-glow"></div>
             ${renderHeader.call(this)}
             <div class="sports-list">${renderList.call(this)}</div>
             ${this.notice ? `<div class="sports-notice" role="status">${escapeHtml(this.notice)}</div>` : ""}
