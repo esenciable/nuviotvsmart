@@ -49,7 +49,7 @@ function createFakeTransport({ hosts = CONFIG.hosts, responses, onCall } = {}) {
   return { transport, calls };
 }
 
-function createHarness({ responses, persistence, hosts } = {}) {
+function createHarness({ responses, persistence, hosts, proxyUrl } = {}) {
   const fake = createFakeTransport({ responses, hosts });
   const portal = createMagisPortal({ config: CONFIG, transport: fake.transport });
   const session = createMagisSession({
@@ -61,11 +61,11 @@ function createHarness({ responses, persistence, hosts } = {}) {
   const probedRequests = [];
   const mediaTransport = async ({ url, headers }) => {
     probedRequests.push({ url, headers });
-    const entry = (responses.__media || []).find((m) => url.startsWith(m.prefix));
+    const entry = (responses.__media || []).find((m) => url.includes(m.prefix.replace(/^https?:\/\//, "")));
     if (!entry) throw new Error(`unexpected media probe: ${url}`);
     return { status: entry.status, headers: entry.headers || {} };
   };
-  const vod = createMagisVod({ portal, config: CONFIG, session, mediaTransport });
+  const vod = createMagisVod({ portal, config: CONFIG, session, mediaTransport, proxyUrl });
   return { vod, session, portal, calls: fake.calls, probedRequests };
 }
 
@@ -423,4 +423,50 @@ test("factory: proxy URL override is read from __NUVIO_ENV__", async () => {
   assert.equal(client.proxyUrl, "http://proxy.example:9000");
   await client.portal.call("v3/ping", {});
   assert.ok(requested[0].url.startsWith("http://proxy.example:9000/magis/"));
+});
+
+// --- media through the proxy ------------------------------------------------
+
+// When a proxy is configured the VOD media url (and the candidate probe) must
+// go through the proxy's media route: a plain browser can neither speak plain
+// http to an https page nor send Content-Auth/User-Agent to the cdn.
+test("vod: with a proxy the probe and the returned media url use the proxy media route", async () => {
+  const harness = createHarness({ responses: VOD_RESPONSES, proxyUrl: "https://tvvidaa.attendanceos.app" });
+  const result = await harness.vod.resolveStream({ title: "The Matrix", year: "1999" });
+  // the probe went through the proxy media route with the credentials in the query
+  assert.match(
+    harness.probedRequests[0].url,
+    /^https:\/\/tvvidaa\.attendanceos\.app\/media\/cdn-a\.vod\.example\/vod\/m-play_media\.mp4\?magis_auth=auth-a/
+  );
+  // the winning candidate is returned as a proxied absolute https url
+  assert.equal(
+    result.url,
+    "https://tvvidaa.attendanceos.app/media/cdn-b.vod.example/vod/m-play_media.mp4?magis_auth=auth-b&magis_license=lic-play"
+  );
+  // the browser sends no custom media headers: the proxy injects them
+  assert.deepEqual(result.headers, {});
+  // the direct Tizen-style resolution stays available for diagnostics
+  assert.equal(result.directUrl, "https://cdn-b.vod.example/vod/m-play_media.mp4");
+  assert.equal(result.directHeaders["Content-Auth"], "auth-b");
+  // no long-lived secret may ever travel in the media url
+  assert.ok(!result.url.includes("ut1"));
+  assert.ok(!result.url.includes("Ranger"));
+});
+
+test("tizen: without a proxy the vod resolver keeps today's absolute direct url and full header set", async () => {
+  globalThis.__NUVIO_ENV__ = {}; // no NUVIO_MAGIS_PROXY_URL -> direct, as on Tizen
+  const harness = createHarness({ responses: VOD_RESPONSES });
+  const result = await harness.vod.resolveStream({ title: "The Matrix", year: "1999" });
+  // the widget ignores CORS and uses absolute media URLs: assert both.
+  assert.equal(result.url, "https://cdn-b.vod.example/vod/m-play_media.mp4");
+  assert.ok(URL.canParse(result.url), "the media url must be absolute");
+  assert.deepEqual(result.headers, {
+    "Content-Auth": "auth-b",
+    "Content-License": "lic-play",
+    "User-Agent": "Ranger/4.9.4-17294ac0",
+    App: CONFIG.appId,
+    "App-Version": CONFIG.apkVersion
+  });
+  assert.equal(harness.probedRequests[0].url, "https://cdn-a.vod.example/vod/m-play_media.mp4");
+  assert.equal(result.directUrl, undefined, "no diagnostics fields on the direct path");
 });

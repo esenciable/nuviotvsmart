@@ -3,9 +3,62 @@
 // loop probing each vod cdn x free/short entry for the first 200/206.
 // Media probing goes through an injectable mediaTransport (the portal proxy is
 // not involved; Tizen plays media via AVPlay, so no proxy is needed there).
+// When a Magis proxy is configured (NUVIO_MAGIS_PROXY_URL, or the injected
+// proxyUrl) the probe AND the returned url go through the proxy's media route
+// instead: a plain browser can neither fetch plain-http media from an https
+// page (mixed content) nor send the CDN's Content-Auth/User-Agent headers.
 import { createDeviceDict } from "./magisSession.js";
+import { MAGIS_PROXY_ENV_KEY } from "./index.js";
 
 export const MAGIS_MEDIA_USER_AGENT = "Ranger/4.9.4-17294ac0";
+
+// Proxy media route: the standalone proxy (scripts/magis-proxy.mjs) answers
+// GET|HEAD /media/<cdn-host>/<path...> and injects the media headers itself.
+// The env key is the same one index.js (readMagisProxyUrl) uses; it is read
+// here too because createMagisVod/createMagisLive must work without importing
+// the factory (and the key travels as a live ESM binding, never at module
+// evaluation time, so the circular import is safe).
+function readProxyUrlFromEnv() {
+  try {
+    return String(globalThis?.__NUVIO_ENV__?.[MAGIS_PROXY_ENV_KEY] || "").trim();
+  } catch (_) {
+    return "";
+  }
+}
+
+export function resolveMagisProxyUrl(explicitProxyUrl) {
+  if (explicitProxyUrl !== undefined) return String(explicitProxyUrl || "").trim();
+  return readProxyUrlFromEnv();
+}
+
+// Build the proxied media url for a resolved direct media url. Only the
+// per-play credentials the portal issued (Content-Auth entry token and
+// Content-License) travel in the query; the constant headers (User-Agent,
+// App, App-Version) are injected by the proxy, and the long-lived session
+// secrets (userToken) never appear. Absent credentials are simply omitted.
+// No proxy configured -> null, so callers keep the direct url (Tizen).
+export function buildProxiedMediaUrl({ proxyUrl, url, headers } = {}) {
+  const base = String(proxyUrl || "")
+    .trim()
+    .replace(/\/+$/, "");
+  if (!base) return null;
+  let target;
+  try {
+    target = new URL(String(url || ""));
+  } catch (_) {
+    return null;
+  }
+  if (target.protocol !== "http:" && target.protocol !== "https:") return null;
+  const proxied = new URL(`${base}/media/${target.hostname}${target.pathname}`);
+  for (const [key, value] of target.searchParams) {
+    proxied.searchParams.set(key, value);
+  }
+  const auth = String(headers?.["Content-Auth"] || "").trim();
+  const license = String(headers?.["Content-License"] || "").trim();
+  if (auth) proxied.searchParams.set("magis_auth", auth);
+  if (license) proxied.searchParams.set("magis_license", license);
+  return proxied.href;
+}
 
 // Measured portal payloads.
 export function buildBaseFields(sessionState) {
@@ -123,7 +176,7 @@ export function defaultMediaTransport({ url, headers, timeoutMs = 12000, fetchIm
     });
 }
 
-export function createMagisVod({ portal, config, session, mediaTransport } = {}) {
+export function createMagisVod({ portal, config, session, mediaTransport, proxyUrl } = {}) {
   if (!portal || typeof portal.call !== "function") {
     throw new Error("magisVod: an injectable portal is required");
   }
@@ -134,6 +187,7 @@ export function createMagisVod({ portal, config, session, mediaTransport } = {})
     throw new Error("magisVod: an injectable session is required");
   }
   const probe = mediaTransport || defaultMediaTransport;
+  const resolvedProxyUrl = resolveMagisProxyUrl(proxyUrl);
 
   async function resolveStream({ title, year, isSeries, season, episode } = {}) {
     if (!title) throw new Error("magisVod: title is required");
@@ -241,9 +295,18 @@ export function createMagisVod({ portal, config, session, mediaTransport } = {})
           license,
           config
         });
+        // With a proxy, both the probe and the playback url point at the
+        // proxy's media route; the credentials ride in the query and the
+        // proxy injects the headers, so the browser sends none.
+        const proxiedUrl = buildProxiedMediaUrl({
+          proxyUrl: resolvedProxyUrl,
+          url,
+          headers: probeHeaders
+        });
+        const probeUrl = proxiedUrl || url;
         let status = null;
         try {
-          const response = await probe({ url, headers: probeHeaders });
+          const response = await probe({ url: probeUrl, headers: probeHeaders });
           status = response?.status ?? null;
         } catch (error) {
           cdnFailed.push({
@@ -256,8 +319,11 @@ export function createMagisVod({ portal, config, session, mediaTransport } = {})
         }
         if (status === 200 || status === 206) {
           return {
-            url,
-            headers: probeHeaders,
+            url: proxiedUrl || url,
+            // through the proxy the browser needs no media headers at all
+            headers: proxiedUrl ? {} : probeHeaders,
+            directUrl: proxiedUrl ? url : undefined,
+            directHeaders: proxiedUrl ? probeHeaders : undefined,
             contentId: mediaId,
             media,
             cdn: main,

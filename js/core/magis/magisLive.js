@@ -10,7 +10,12 @@
 // signal races each portal call (a zap rejects the await immediately) and is
 // forwarded verbatim to the media probe transport, where the fetch aborts.
 import { createDeviceDict } from "./magisSession.js";
-import { buildBaseFields, buildMediaProbeHeaders } from "./magisVod.js";
+import {
+  buildBaseFields,
+  buildMediaProbeHeaders,
+  buildProxiedMediaUrl,
+  resolveMagisProxyUrl
+} from "./magisVod.js";
 
 export const MAGIS_LIVE_COLUMN_CODE = "masnew_live";
 export const MAGIS_LIVE_PAGE_SIZE = 100;
@@ -118,6 +123,7 @@ export function createMagisLive({
   config,
   session,
   mediaTransport,
+  proxyUrl,
   now = () => Date.now(),
   categoriesTtlMs = MAGIS_LIVE_CATEGORIES_TTL_MS,
   channelTtlMs = MAGIS_LIVE_CHANNEL_TTL_MS
@@ -132,6 +138,7 @@ export function createMagisLive({
     throw new Error("magisLive: an injectable session is required");
   }
   const probe = mediaTransport || defaultLiveMediaTransport;
+  const resolvedProxyUrl = resolveMagisProxyUrl(proxyUrl);
 
   let categoriesCache = null; // { value, expiresAt }
   const channelCache = new Map(); // `${columnId}:${pageNum}:${pageSize}` -> { value, expiresAt }
@@ -299,15 +306,23 @@ export function createMagisLive({
           license: address.license,
           config
         });
+        // With a Magis proxy the probe AND the playlist url go through the
+        // proxy's media route: a plain https page can neither fetch this
+        // plain-http url (mixed content) nor send the CDN headers.
+        const proxiedUrl = buildProxiedMediaUrl({ proxyUrl: resolvedProxyUrl, url, headers });
+        const probeUrl = proxiedUrl || url;
         let status = null;
         try {
-          const probeResult = await probe({ url, headers, signal });
+          const probeResult = await probe({ url: probeUrl, headers, signal });
           status = probeResult?.status ?? null;
           const bodyPrefix = String(probeResult?.bodyPrefix || "");
           if ((status === 200 || status === 206) && bodyPrefix.startsWith("#EXTM3U")) {
             return {
-              url,
-              headers,
+              url: proxiedUrl || url,
+              // through the proxy the browser sends no media headers
+              headers: proxiedUrl ? {} : headers,
+              directUrl: proxiedUrl ? url : undefined,
+              directHeaders: proxiedUrl ? headers : undefined,
               diagnostics: {
                 cdnAnswered: host,
                 cdnFailed
