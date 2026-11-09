@@ -8,6 +8,8 @@ node_modules/
 tests/*
 !tests/helpers/
 !tests/helpers/*.mjs
+!tests/fixtures/
+!tests/fixtures/*
 !tests/test-vidaa-home-patching.html
 !tests/test-vidaa-account-dom.html
 !tests/test-vidaa-tracking-dom.html

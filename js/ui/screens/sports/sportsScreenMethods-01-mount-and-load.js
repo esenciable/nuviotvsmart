@@ -181,14 +181,14 @@ export function createSportsScreenMethods01() {
         this.renderSecondaryNotice(["api-live.euroleague.net"]);
       }
       // FOURTH SCHEDULE SOURCE (Liga Endesa / ACB): the Spanish league ESPN
-      // lacks, scraped from acb.com/es/liga/partidos — the Tizen/Android
-      // engines bypass CORS (the TV measures readable bodies from the
-      // CORS-less host), so the RSC page is pulled directly. It loads AFTER
+      // lacks, read from its official JSON API (api2.acb.com), which answers
+      // with open CORS — no proxy and no engine trick needed. It loads AFTER
       // the ESPN slate, the sporting-events rows and the EuroLeague rows,
-      // appending through the SAME paint path guarded by canPaint(): the
-      // parsed round is cached 30 min, a body above 1 MB is skipped, and a
-      // failed or unparsable page is ONE muted line — the rows painted above
-      // are never touched, and no live state is ever invented for its games.
+      // appending through the SAME paint path guarded by canPaint(): one
+      // request per round bounded by the shared ESPN budget, the parsed round
+      // cached per round for 30 min, and a failed read is ONE muted line —
+      // never cached, so the next load retries. The rows painted above are
+      // never touched, and no live state is ever invented for its games.
       try {
         const acb = await acbForDay({ dayKey: this.dayKey, force });
         if (!canPaint()) return; // the screen or the day moved on; render nothing new

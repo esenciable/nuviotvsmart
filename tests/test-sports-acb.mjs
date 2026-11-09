@@ -1,8 +1,9 @@
-// Liga Endesa (ACB): unit contract for the acb.com/es/liga/partidos scrape —
-// the Next.js RSC stream parser (manual quote scanner, NEVER a giant regex),
-// the unified event mapping, the 1 MB body cap, the 30 min round cache and
-// failure isolation. node --test runs fully OFFLINE: every fetch is injected,
-// no network call is ever made.
+// Liga Endesa (ACB): unit contract for the official JSON API that replaced the
+// acb.com RSC scrape — the URL/header builders, the parser against a REAL
+// payload captured from the live endpoint (tests/fixtures/acb-matches.json,
+// copied verbatim from the measured run), the unified event mapping and the
+// per-round 30 min cache. node --test runs fully OFFLINE: every fetch is
+// injected, no network call is ever made.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -12,457 +13,442 @@ import { readFileSync } from "node:fs";
 import * as acb from "../js/core/sports/acb.js";
 
 const {
-  ACB_PAGE_URL,
-  ACB_MAX_BYTES,
+  ACB_API_URL,
+  ACB_API_KEY,
+  ACB_SOURCE_LABEL,
   ACB_CACHE_TTL_MS,
-  ACB_FAILURE_TTL_MS,
-  parseAcbRound,
+  acbMatchesUrl,
+  acbRequestHeaders,
+  parseAcbMatches,
   acbEventsForLocalDay,
   acbForDay,
   clearAcbCache
 } = acb;
 
-const HOUR = 60 * 60 * 1000;
-// Fixed local clock: 2026-01-15 12:00 local. Kickoffs are built around the
-// SAME local day so the local-day window is observable.
-const NOW = new Date(2026, 0, 15, 12, 0, 0).getTime();
+const ACB_SOURCE = readFileSync(new URL("../js/core/sports/acb.js", import.meta.url), "utf8");
 
-// An ISO instant N hours from local noon of the fixture day (UTC string, the
-// shape startDateTime ships).
-function isoAt(hourOffset) {
-  return new Date(NOW + hourOffset * HOUR).toISOString();
+// The REAL payload (26 KB, jornada 6021, 18 teams / 9 matches) captured from
+// `GET https://api2.acb.com/api/seasondata/Competition/matches
+//  ?competitionId=1&isRoundSelected=true`. Never hand-written: every
+// expectation below is derived from these rows, so the fixture stays the
+// source of truth.
+const PAYLOAD = JSON.parse(
+  readFileSync(new URL("./fixtures/acb-matches.json", import.meta.url), "utf8")
+);
+const ROUND = PAYLOAD.selectedFilters.round; // 6021
+
+function clone(payload) {
+  return JSON.parse(JSON.stringify(payload));
 }
 
-// ---- The RSC fixture: reproduces the THREE measured realities --------------
-//
-// REALITY 1 (the escaping trap): the round JSON is EMBEDDED ESCAPED inside
-// the chunk strings — the chunk text holds `\"teams\":` and `\"matches\":`,
-// never the plain keys. Searching raw chunk text for `"teams":` finds ZERO
-// occurrences (this is exactly why the first implementation failed every
-// real request), so each chunk must be unescaped once before key search.
-//
-// REALITY 2: the FIRST `"teams":` after unescaping is a translation label
-// ("teams":"Equipos") — the parser must skip it and find the ONE object that
-// carries BOTH `teams` and `matches`.
-//
-// REALITY 3: a ~22 KB literal inside an unrelated row — a regex-based
-// extractor blows the native engine's stack on it; the manual quote scanner
-// must ride through (the literal even contains escaped quotes and braces).
-//
-// The round row is ALSO split across two `self.__next_f.push` chunks (rows
-// span pushes) and carries `$3c:props:children:props:children:0:props:data:
-// teams:N` refs against its `teams` array — exactly the measured page.
-
-const TEAM_A = {
-  id: 4460,
-  fullName: "Real Madrid",
-  shortName: "Real Madrid",
-  abbreviatedName: "RMB",
-  primaryColorHex: "#154284",
-  textColorHex: "#999999",
-  logo: "https://static.acb.com/img/www/clubes2026/202526RealMadridLogoPositivo.png"
-};
-const TEAM_B = {
-  id: 4473,
-  fullName: "Asisa Joventut",
-  shortName: "Joventut",
-  abbreviatedName: "JOV",
-  primaryColorHex: "#2f8e62",
-  textColorHex: "#999999",
-  logo: "https://static.acb.com/img/www/clubes2026/202526JoventutLogoPositivo.png"
-};
-const TEAMS_REF_HOME = "$3c:props:children:props:children:0:props:data:teams:0";
-const TEAMS_REF_AWAY = "$3c:props:children:props:children:0:props:data:teams:1";
-
-const FINALIZED_MATCH = {
-  id: 105429,
-  homeTeam: TEAMS_REF_HOME,
-  awayTeam: TEAMS_REF_AWAY,
-  homeScore: 100,
-  awayScore: 99,
-  startDateTime: isoAt(2),
-  matchStatus: "FINALIZED",
-  isOnHalfTime: false,
-  currentQuarter: 6,
-  broadcastChannels: { primary: [{ name: "DAZN" }, { name: "Movistar Plus +" }] }
-};
-
-const NOT_STARTED_MATCH = {
-  id: 105430,
-  homeTeam: TEAMS_REF_AWAY,
-  awayTeam: TEAMS_REF_HOME,
-  startDateTime: isoAt(8),
-  matchStatus: "NOT_STARTED",
-  // "Más Deportes" is written with a ROW-LEVEL \uXXXX escape in the round
-  // JSON (the measured payload shape); chunk-level escaping wraps it again.
-  broadcastChannels: {
-    primary: [{ name: "Más Deportes" }, { name: "ETB" }]
-  }
-};
-
-// A status the payload never explained: the mapping must NOT claim a state
-// for it (a live state is never invented) — the row is skipped.
-const UNKNOWN_STATUS_MATCH = {
-  id: 105431,
-  homeTeam: TEAMS_REF_HOME,
-  awayTeam: TEAMS_REF_AWAY,
-  startDateTime: isoAt(10),
-  matchStatus: "IN_PROGRESS",
-  homeScore: 40,
-  awayScore: 38
-};
-
-function roundObjectJson() {
-  return JSON.stringify({
-    currentRoundId: 6021, // competition-level: the round object carries it, the events do not
-    teams: [TEAM_A, TEAM_B],
-    matches: [FINALIZED_MATCH, NOT_STARTED_MATCH, UNKNOWN_STATUS_MATCH]
-  });
+function localDayOf(ms) {
+  const date = new Date(ms);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
 }
 
-// One JSON-string-style escaping pass (the INVERSE of what the module's
-// scanner does to a chunk): turns plain row JSON into the escaped chunk text
-// the real page carries (`"` -> `\"`, `\\` -> `\\\\`).
-function escapeForChunkText(text) {
-  let out = "";
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    out += ch === "\\" ? "\\\\" : ch === '"' ? "\\\"" : ch;
-  }
-  return out;
-}
-
-// A single self.__next_f.push row wrapping one chunk text.
-function pushChunk(chunkText) {
-  return `self.__next_f.push([1,${JSON.stringify(chunkText)}]);`;
-}
-
-// The round row is split mid-JSON across two pushes (RSC rows span chunks).
-// The chunk text is the ESCAPED round JSON — `\"teams\":` / `\"matches\":` —
-// exactly the measured reality.
-function roundRowPieces() {
-  // The \uXXXX escape sits at the ROW-JSON level (one backslash), exactly
-  // like a measured payload; escapeForChunkText wraps it once more.
-  const row = `3c:${roundObjectJson()}`.replace("Más Deportes", "M\\u00e1s Deportes");
-  const escaped = escapeForChunkText(row);
-  const cut = escaped.indexOf("\\\"matches\\\"");
-  return [escaped.slice(0, cut), escaped.slice(cut)];
-}
-
-// A fetch double answering URLs with TEXT bodies (the layer reads .text() —
-// the size cap is observable). Entries: { text } | { boom: true }.
-function textFetch(byUrl) {
+// A JSON fetch double: answers every URL with the payload and records the
+// exact (url, init) pairs, so the header contract is observable.
+function jsonFetch(payload = PAYLOAD) {
   const calls = [];
-  const impl = async (url) => {
-    calls.push(String(url));
-    const responder = byUrl[String(url)];
-    if (!responder) throw new Error(`unexpected url ${url}`);
-    if (responder.boom) throw new Error("network down");
-    return { ok: true, status: 200, text: async () => responder.text };
+  const impl = async (url, init) => {
+    calls.push({ url: String(url), init: init ?? {} });
+    if (payload instanceof Error) throw payload;
+    if (payload && payload.status && payload.ok === false) return payload;
+    return { ok: true, status: 200, json: async () => clone(payload) };
   };
   return { impl, calls };
 }
 
-// Builds the measured page shape: pushes whose string literal is the
-// JS-escaped RSC chunk text.
-function acbPageText({ withGarbageChunks = true } = {}) {
-  const translationRow = `{"translation":{"teams":"Equipos","matches":"Partidos"}}`;
-  const big = "x".repeat(22 * 1024);
-  const bigRow = `4d:{"asset":"${big}","note":"a \\"quoted\\" { brace } literal"}`;
-  const [roundA, roundB] = roundRowPieces();
-  const chunks = [`2:I[1,[],""]`, translationRow, bigRow, roundA, roundB];
-  if (withGarbageChunks) {
-    // An unterminated string and a dangling escape: malformed chunks are
-    // SKIPPED, never thrown.
-    chunks.push(`self.__next_f.push([1,"unterminated chunk...`);
-    chunks.push(`self.__next_f.push([1,"trailing backslash chunk \\`);
-  }
-  return chunks.map((c) => pushChunk(c)).join("\n");
-}
+describe("acb: URL builder — roundId, never the silently-ignored round param", () => {
+  test("the base request is the measured endpoint with the competition and the round filter", () => {
+    assert.equal(ACB_API_URL, "https://api2.acb.com/api/seasondata/Competition/matches");
+    const url = acbMatchesUrl();
+    assert.ok(url.startsWith(`${ACB_API_URL}?`), url);
+    assert.match(url, /[?&]competitionId=1(&|$)/, "competitionId=1 is Liga Endesa");
+    assert.match(url, /[?&]isRoundSelected=true(&|$)/, "the round must be resolved server-side");
+    assert.doesNotMatch(url, /roundId=/, "the current round sends NO roundId");
+  });
 
-describe("acb: page URL and cost constants", () => {
-  test("the scrape targets the measured round page with the bounded budget", () => {
-    assert.equal(ACB_PAGE_URL, "https://acb.com/es/liga/partidos");
-    assert.equal(ACB_MAX_BYTES, 1024 * 1024, "a 1 MB body cap");
-    assert.equal(ACB_CACHE_TTL_MS, 30 * 60 * 1000, "the round is cached 30 minutes");
-    assert.equal(ACB_FAILURE_TTL_MS, 10 * 60 * 1000, "a failure is cached 10 minutes");
+  test("a roundId switches round; `round=` is never sent (it answers 200 and is ignored)", () => {
+    const url = acbMatchesUrl(ROUND);
+    assert.match(url, new RegExp(`[?&]roundId=${ROUND}(&|$)`), url);
+    assert.doesNotMatch(url, /[?&]round=/, `the ignored param is never sent: ${url}`);
+    assert.match(acbMatchesUrl(String(ROUND)), new RegExp(`roundId=${ROUND}(&|$)`));
+    for (const garbage of [null, undefined, "", 0, -3, 1.5, "6021abc", NaN, " "]) {
+      assert.doesNotMatch(acbMatchesUrl(garbage), /roundId=/, `rejected: ${String(garbage)}`);
+    }
+  });
+
+  test("the key is one named, commented, revocable constant sent as x-apikey", () => {
+    assert.equal(typeof ACB_API_KEY, "string");
+    assert.match(ACB_API_KEY, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    assert.deepEqual(acbRequestHeaders(), {
+      accept: "application/json",
+      "x-apikey": ACB_API_KEY
+    });
+    assert.notEqual(acbRequestHeaders(), acbRequestHeaders(), "a fresh object per request");
+    // The key ships inside acb.com's own JS bundle, so it is public — and
+    // revocable: the source must say so where the constant is declared.
+    const at = ACB_SOURCE.indexOf("export const ACB_API_KEY");
+    assert.ok(at > 0, "one named exported constant");
+    const decl = ACB_SOURCE.slice(Math.max(0, at - 900), at + 200);
+    assert.match(decl, /public/i, "the constant is documented as public");
+    assert.match(decl, /revocab/i, "and as revocable");
   });
 });
 
-describe("acb: the RSC parser — both traps, manual scanner, malformed chunks never throw", () => {
-  test("the fixture reproduces the measured ESCAPED reality: keys appear as \\\"teams\\\": in the chunk strings", () => {
-    const page = acbPageText();
-    // The raw page carries the round JSON DOUBLY escaped (measured: the keys
-    // literally appear as \\"teams\\\":) — a parser that searches raw chunk
-    // text for the plain key finds ZERO occurrences and must fail RED.
-    assert.ok(page.includes('\\\\\\\"teams\\\\\\\":'), "the escaped round key is present at page level");
-    assert.ok(!page.includes('"teams":[{'), "the plain round key never leaks to page level");
-  });
-
-  test("TRAP 1 + TRAP 2: the translation-label teams and the 22 KB literal are ridden through; the round object is found", () => {
-    const events = parseAcbRound(acbPageText());
-    assert.equal(events.length, 2, "FINALIZED + NOT_STARTED land; the unknown status never does");
-    assert.ok(events.every((ev) => ev.id.startsWith("acb:")));
-  });
-
-  test("rows split across two self.__next_f.push chunks reassemble", () => {
-    // Only the two round halves, nothing else: the row is unusable unless
-    // the pushes are concatenated.
-    const [a, b] = roundRowPieces();
-    const page = [a, b]
-      .map((c) => `self.__next_f.push([1,${JSON.stringify(c)}]);`)
-      .join("\n");
-    const events = parseAcbRound(page);
-    assert.equal(events.length, 2);
-    assert.deepEqual(events.map((ev) => ev.id), ["acb:105429", "acb:105430"]);
-  });
-
-  test("malformed chunks (unterminated string, dangling escape) are skipped, never thrown", () => {
-    const events = parseAcbRound(acbPageText({ withGarbageChunks: true }));
-    assert.equal(events.length, 2, "the valid rows still parse beside the garbage");
-    const nonsense = 'self.__next_f.push([1,"\\\\o/ no closing quote and no round object';
-    assert.deepEqual(parseAcbRound(nonsense), [], "a page with no round object yields []");
-    assert.deepEqual(parseAcbRound(""), []);
-    assert.deepEqual(parseAcbRound("<!doctype html><html></html>"), []);
-  });
-
-  test("no giant regex is used anywhere in the module source (the 22 KB-literal trap)", () => {
-    const source = readFileSync(
-      new URL("../js/core/sports/acb.js", import.meta.url),
-      "utf8"
-    );
-    // A regex over the payload is exactly the stack-overflow trap; the
-    // module must scan with indexOf/charCode loops instead.
-    assert.doesNotMatch(source, /\/(?![/*]).*\/[gimsuy]*\s*\.?(test|exec|match)\(/);
-  });
-});
-
-describe("acb: the unified event mapping (sides, kickoff, scores, broadcast)", () => {
-  test("FINALIZED -> post with its real scores; NOT_STARTED -> pre with NO score", () => {
-    const events = parseAcbRound(acbPageText());
-    const finished = events.find((ev) => ev.id === "acb:105429");
-    const scheduled = events.find((ev) => ev.id === "acb:105430");
-    assert.equal(finished.state, "post");
-    assert.equal(finished.status, "finished");
-    assert.equal(finished.home.score, 100);
-    assert.equal(finished.away.score, 99);
-    assert.equal(scheduled.state, "pre");
-    assert.equal(scheduled.status, "scheduled");
-    assert.equal(scheduled.home.score, null, "no score is invented for a not-started match");
-    assert.equal(scheduled.away.score, null);
-  });
-
-  test("sides resolve through the measured $3c:…:data:teams:N refs against the round object's teams array", () => {
-    const events = parseAcbRound(acbPageText());
-    const finished = events.find((ev) => ev.id === "acb:105429");
-    const scheduled = events.find((ev) => ev.id === "acb:105430");
-    // The ref index decides the side — NOT the array order of the match.
-    assert.equal(finished.home.name, "Real Madrid");
-    assert.equal(finished.away.name, "Asisa Joventut");
-    assert.equal(scheduled.home.name, "Asisa Joventut", "the away ref of match 2 is teams:1");
-    assert.equal(scheduled.away.name, "Real Madrid");
-  });
-
-  test("the real team fields map through: fullName, abbreviatedName, primaryColorHex, logo", () => {
-    const events = parseAcbRound(acbPageText());
-    const finished = events.find((ev) => ev.id === "acb:105429");
-    assert.equal(finished.home.abbr, "RMB", "abbreviatedName is the abbr");
-    assert.equal(finished.home.color, "#154284", "primaryColorHex is the colour");
-    assert.equal(finished.home.logo, TEAM_A.logo, "logo is the logo");
-    assert.equal(finished.away.abbr, "JOV");
-    assert.equal(finished.away.color, "#2f8e62");
-    assert.equal(finished.away.logo, TEAM_B.logo);
-  });
-
-  test("kickoff comes from startDateTime; every documented-absent field stays null", () => {
-    const events = parseAcbRound(acbPageText());
-    const finished = events.find((ev) => ev.id === "acb:105429");
-    assert.equal(finished.kickoffMs, Date.parse(FINALIZED_MATCH.startDateTime));
-    assert.equal(finished.leagueName, "Liga Endesa");
-    assert.equal(finished.venue, null);
-    assert.equal(finished.live, false, "a live state is NEVER invented");
-    assert.equal(finished.period, 0);
+describe("acb: parser against the real payload — teams, scores, statuses, period, broadcast", () => {
+  test("every match becomes one unified event, in payload order, with the acb:<matchId> id", () => {
+    const events = parseAcbMatches(PAYLOAD);
+    assert.equal(events.length, PAYLOAD.matches.length, "the fixture round is fully mapped");
     assert.deepEqual(
-      { ...finished.home },
-      {
-        name: "Real Madrid",
-        abbr: "RMB",
-        score: 100,
-        record: null,
-        color: "#154284",
-        logo: TEAM_A.logo
-      }
+      events.map((ev) => ev.id),
+      PAYLOAD.matches.map((match) => `acb:${match.id}`)
     );
-    assert.deepEqual(
-      { ...finished.away },
-      {
-        name: "Asisa Joventut",
-        abbr: "JOV",
-        score: 99,
-        record: null,
-        color: "#2f8e62",
-        logo: TEAM_B.logo
-      }
+    for (const event of events) {
+      assert.equal(event.slug, "acb");
+      assert.equal(event.sportType, "basketball");
+      assert.equal(event.leagueName, "Liga Endesa");
+      assert.equal(event.leagueAbbr, "ACB");
+      assert.equal(event.leagueLogo, "");
+      assert.equal(event.venue, null, "the API carries no venue");
+      assert.equal(event.clock, "");
+      assert.equal(event.situation, "");
+      assert.equal(event.live, false, "a live state is NEVER invented");
+    }
+  });
+
+  test("sides resolve through homeTeamId/awayTeamId against teams[].id — name, abbr, colour, logo", () => {
+    const events = parseAcbMatches(PAYLOAD);
+    const byId = new Map(PAYLOAD.teams.map((team) => [team.id, team]));
+    events.forEach((event, index) => {
+      const match = PAYLOAD.matches[index];
+      const home = byId.get(match.homeTeamId);
+      const away = byId.get(match.awayTeamId);
+      assert.ok(home && away, `match ${match.id} references two known teams`);
+      assert.equal(event.home.name, home.fullName.trim());
+      assert.equal(event.home.abbr, home.abbreviatedName);
+      assert.equal(event.home.color, home.primaryColorHex);
+      assert.equal(event.home.logo, home.logo);
+      assert.equal(event.home.record, null, "the API carries no record");
+      assert.equal(event.away.name, away.fullName.trim());
+      assert.equal(event.away.abbr, away.abbreviatedName);
+      assert.equal(event.away.color, away.primaryColorHex);
+      assert.equal(event.away.logo, away.logo);
+      assert.equal(event.away.record, null);
+      assert.notEqual(event.home.name, event.away.name, "the two sides are never the same team");
+    });
+  });
+
+  test("FINALIZED -> post/finished with its real scores; kickoff from startDateTime", () => {
+    const events = parseAcbMatches(PAYLOAD);
+    events.forEach((event, index) => {
+      const match = PAYLOAD.matches[index];
+      assert.equal(match.matchStatus, "FINALIZED", "the captured round is a finished one");
+      assert.equal(event.state, "post");
+      assert.equal(event.status, "finished");
+      assert.equal(event.home.score, match.homeScore);
+      assert.equal(event.away.score, match.awayScore);
+      assert.equal(event.kickoffMs, Date.parse(match.startDateTime));
+    });
+  });
+
+  test("period comes from currentQuarter (6 = overtime), not a hard-coded 0", () => {
+    const events = parseAcbMatches(PAYLOAD);
+    events.forEach((event, index) => {
+      assert.equal(event.period, PAYLOAD.matches[index].currentQuarter);
+    });
+    const overtime = events.filter((event) => event.period === 6);
+    assert.ok(
+      overtime.length >= 1,
+      `the fixture holds an overtime match (currentQuarter 6): ${events.map((e) => e.period)}`
     );
   });
 
-  test("broadcastChannels.primary[].name lands in event.broadcast", () => {
-    const events = parseAcbRound(acbPageText());
-    const finished = events.find((ev) => ev.id === "acb:105429");
-    const scheduled = events.find((ev) => ev.id === "acb:105430");
-    assert.deepEqual(finished.broadcast, ["DAZN", "Movistar Plus +"]);
-    assert.deepEqual(scheduled.broadcast, ["Más Deportes", "ETB"], "escaped \\uXXXX unescapes");
+  test("NOT_STARTED and NOT_SCHEDULED -> pre/scheduled and not live, scores NEVER rendered", () => {
+    // Derived from a REAL row (only matchStatus is flipped): the scores the
+    // finalized payload carries stay in place, so the mapping must key on the
+    // status — never on the presence of a number.
+    const real = PAYLOAD.matches[0];
+    assert.ok(Number.isFinite(real.homeScore));
+    for (const status of ["NOT_STARTED", "NOT_SCHEDULED"]) {
+      const payload = clone(PAYLOAD);
+      payload.matches = [{ ...payload.matches[0], matchStatus: status }];
+      const [event] = parseAcbMatches(payload);
+      assert.ok(event, `${status} is a known status`);
+      assert.equal(event.state, "pre", status);
+      assert.equal(event.status, "scheduled", status);
+      assert.equal(event.live, false, status);
+      assert.equal(event.home.score, null, "a payload score is never rendered before the final");
+      assert.equal(event.away.score, null);
+      assert.equal(event.kickoffMs, Date.parse(real.startDateTime));
+      assert.equal(event.period, real.currentQuarter, "the quarter still comes from the payload");
+    }
   });
 
-  test("garbage rows are dropped, never thrown: a broken round object yields []", () => {
+  test("an UNOBSERVED status is dropped, never labelled: no live string is invented", () => {
+    for (const status of ["IN_PROGRESS", "LIVE", "HALFTIME", "", null, undefined]) {
+      const payload = clone(PAYLOAD);
+      payload.matches = [{ ...payload.matches[0], matchStatus: status }];
+      assert.deepEqual(parseAcbMatches(payload), [], `dropped: ${String(status)}`);
+    }
+    const mixed = clone(PAYLOAD);
+    mixed.matches = [
+      { ...PAYLOAD.matches[0], matchStatus: "FINALIZED" },
+      { ...PAYLOAD.matches[1], matchStatus: "IN_PROGRESS" }
+    ];
     assert.deepEqual(
-      parseAcbRound(pushChunk(escapeForChunkText('3d:{"teams":[],"matches":"not an array"}'))),
-      []
+      parseAcbMatches(mixed).map((event) => event.id),
+      [`acb:${PAYLOAD.matches[0].id}`],
+      "the unknown row never costs the known ones"
     );
+  });
+
+  test("broadcastChannels is a FLAT array: primary broadcasters surface in `order` sequence", () => {
+    // Measured trap: the API ships [{broadcaster,primary,order,…}], NOT the
+    // {primary[],secondary[]} object the RSC scrape parsed — so the old
+    // mapping silently dropped every channel.
+    const flat = PAYLOAD.matches[0].broadcastChannels;
+    assert.ok(Array.isArray(flat), "the fixture proves the flat shape");
+    assert.ok(flat.every((entry) => typeof entry.broadcaster === "string"));
+
+    const events = parseAcbMatches(PAYLOAD);
+    events.forEach((event, index) => {
+      const rows = PAYLOAD.matches[index].broadcastChannels ?? [];
+      const expected = rows
+        .map((entry, position) => ({ entry, position }))
+        .filter(({ entry }) => entry.primary === true)
+        .sort((a, b) => a.entry.order - b.entry.order || a.position - b.position)
+        .map(({ entry }) => entry.broadcaster.trim());
+      assert.deepEqual(event.broadcast, expected, `match ${PAYLOAD.matches[index].id}`);
+    });
+  });
+
+  test("`order` wins over array position and non-primary channels are excluded", () => {
+    // This real row: DAZN(1, primary), Movistar Plus +(5, NOT primary),
+    // Orange(6), Vodafone TV(7), Vamos(2, primary but LAST in the array).
+    const index = PAYLOAD.matches.findIndex((match) =>
+      Array.isArray(match.broadcastChannels)
+        ? match.broadcastChannels.some((e) => e.primary === false) &&
+          match.broadcastChannels.some((e) => e.primary === true && e.order === 2)
+        : false
+    );
+    assert.ok(index >= 0, "the fixture carries such a row");
+    const match = PAYLOAD.matches[index];
+    const event = parseAcbMatches(PAYLOAD)[index];
     assert.deepEqual(
-      parseAcbRound(pushChunk(escapeForChunkText('3d:{"teams":"Equipos","matches":[]}'))),
-      [],
-      "the translation-label shape is not a round"
+      event.broadcast,
+      ["DAZN", "Vamos", "Orange", "Vodafone TV"],
+      `the primary-only channels in order: ${JSON.stringify(match.broadcastChannels.map((e) => `${e.broadcaster}:${e.primary}:${e.order}`))}`
     );
-    assert.deepEqual(
-      parseAcbRound(
-        pushChunk(
-          escapeForChunkText(
-            '3d:{"matches":[{ "id":"1","startDateTime":"nope","matchStatus":"FINALIZED"}],"teams":[]}'
-          )
-        )
-      ),
-      []
+    assert.ok(
+      !event.broadcast.includes("Movistar Plus +"),
+      "the primary:false row is not a card channel"
     );
+  });
+
+  test("garbage degrades to [] and drops rows, never throws", () => {
+    assert.deepEqual(parseAcbMatches(null), []);
+    assert.deepEqual(parseAcbMatches({}), []);
+    assert.deepEqual(parseAcbMatches({ teams: PAYLOAD.teams, matches: "nope" }), []);
+    const badId = clone(PAYLOAD);
+    badId.matches = [{ ...PAYLOAD.matches[0], id: null }];
+    assert.deepEqual(parseAcbMatches(badId), [], "no stable id can be built");
+    const badDate = clone(PAYLOAD);
+    badDate.matches = [{ ...PAYLOAD.matches[0], startDateTime: "nope" }];
+    assert.deepEqual(parseAcbMatches(badDate), [], "never day-filterable");
+    const unknownTeam = clone(PAYLOAD);
+    unknownTeam.matches = [{ ...PAYLOAD.matches[0], homeTeamId: 999999 }];
+    assert.deepEqual(parseAcbMatches(unknownTeam), [], "an unresolvable side is dropped");
+    const noTeams = clone(PAYLOAD);
+    noTeams.teams = [];
+    assert.deepEqual(parseAcbMatches(noTeams), []);
   });
 });
 
 describe("acb: local day filtering (the same local-day window as the rest of the screen)", () => {
   test("events land on the requested LOCAL day only", () => {
-    const events = parseAcbRound(acbPageText());
-    assert.equal(acbEventsForLocalDay(events, { dayKey: "0", now: NOW }).length, 2);
-    assert.equal(acbEventsForLocalDay(events, { dayKey: "1", now: NOW }).length, 0);
-    assert.equal(acbEventsForLocalDay(events, { dayKey: "-1", now: NOW }).length, 0);
+    const events = parseAcbMatches(PAYLOAD);
+    const now = Date.parse(PAYLOAD.matches[0].startDateTime) + 60 * 60 * 1000;
+    const today = localDayOf(now);
+    const countOn = (dayStart) =>
+      PAYLOAD.matches.filter((match) => localDayOf(Date.parse(match.startDateTime)) === dayStart)
+        .length;
+    assert.equal(
+      acbEventsForLocalDay(events, { dayKey: "0", now }).length,
+      countOn(today),
+      "every fixture row of that local day"
+    );
+    assert.equal(
+      acbEventsForLocalDay(events, { dayKey: "1", now }).length,
+      countOn(today + 24 * 60 * 60 * 1000)
+    );
+    assert.equal(acbEventsForLocalDay(events, { dayKey: "-1", now }).length, 0);
+    assert.deepEqual(acbEventsForLocalDay(null, { dayKey: "0", now }), []);
   });
 });
 
-describe("acb: the day fetch — bounded budget, 1 MB cap, 30 min cache, failure isolation", () => {
-  test("the round page is fetched once and mapped into unified events for the visible local day", async () => {
+describe("acb: the day fetch — bounded JSON, x-apikey, per-round cache, failures never cached", () => {
+  test("one request with the api key, mapped into unified events for the visible local day", async () => {
     clearAcbCache();
-    const { impl, calls } = textFetch({ [ACB_PAGE_URL]: { text: acbPageText() } });
-    const result = await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => NOW });
-    assert.deepEqual(calls, [ACB_PAGE_URL], "exactly one request, the measured page");
-    assert.deepEqual(result.failedCompetitions, []);
+    const { impl, calls } = jsonFetch();
+    const now = Date.parse(PAYLOAD.matches[0].startDateTime) + 60 * 60 * 1000;
+    const result = await acbForDay({ dayKey: "0", fetchImpl: impl, now });
+    assert.equal(calls.length, 1, "one request per round");
+    assert.equal(calls[0].url, acbMatchesUrl(), "the current round, no roundId");
+    assert.equal(calls[0].init.headers["x-apikey"], ACB_API_KEY, "the request carries x-apikey");
+    assert.equal(calls[0].init.headers.accept, "application/json");
     assert.equal(result.failed, 0);
-    assert.deepEqual(result.events.map((ev) => ev.id), ["acb:105429", "acb:105430"]);
+    assert.deepEqual(result.failedCompetitions, []);
+    assert.deepEqual(
+      result.events.map((event) => event.id),
+      acbEventsForLocalDay(parseAcbMatches(PAYLOAD), { dayKey: "0", now }).map((e) => e.id)
+    );
   });
 
-  test("the 30 min cache: a warm round is never re-downloaded; after 30 min it revalidates", async () => {
+  test("the cache is keyed by ROUND: the current round is served warm, another round is fetched", async () => {
     clearAcbCache();
-    const now = { t: NOW };
-    const { impl, calls } = textFetch({ [ACB_PAGE_URL]: { text: acbPageText() } });
-    await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    const now = Date.parse(PAYLOAD.matches[0].startDateTime) + 60 * 60 * 1000;
+    const { impl, calls } = jsonFetch();
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now });
     assert.equal(calls.length, 1);
-    now.t += 10 * 60 * 1000; // +10 min, well inside 30
-    const warm = await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
-    assert.equal(calls.length, 1, "a warm cache makes zero requests");
-    assert.equal(warm.events.length, 2, "the cached round is re-filtered per day");
-    now.t += ACB_CACHE_TTL_MS + 1000; // past 30 min
-    await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
-    assert.equal(calls.length, 2, "after 30 min the page revalidates");
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now }); // same round: the payload's roundId
+    assert.equal(calls.length, 1, "a warm round makes zero requests");
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now, roundId: ROUND });
+    assert.equal(calls.length, 1, "an explicit roundId hits the SAME per-round entry");
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now, roundId: 6022 });
+    assert.equal(calls.length, 2, "another round is its own cache entry");
+    assert.match(calls[1].url, /roundId=6022(&|$)/);
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now });
+    assert.equal(calls.length, 2, "the current round is still warm");
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now, force: true });
+    assert.equal(calls.length, 3, "force bypasses the cache");
   });
 
-  test("the 1 MB cap: an oversized body is skipped and LOGGED, and the failure is cached 10 min", async () => {
+  test("the round is revalidated after 30 minutes and the day filter re-runs per call", async () => {
     clearAcbCache();
-    const warnings = [];
-    const originalWarn = console.warn;
-    console.warn = (...args) => warnings.push(args.map(String).join(" "));
-    try {
-      const now = { t: NOW };
-      const { impl, calls } = textFetch({
-        [ACB_PAGE_URL]: { text: "x".repeat(ACB_MAX_BYTES + 1) }
-      });
-      const first = await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
-      assert.deepEqual(first.failedCompetitions, ["acb.com"]);
-      assert.equal(first.events.length, 0);
-      assert.ok(
-        warnings.some((line) => line.includes("acb") && /\d{7,}/.test(line)),
-        `the skip is logged with the size: ${JSON.stringify(warnings)}`
-      );
-      now.t += 60 * 1000;
-      await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
-      assert.equal(calls.length, 1, "the oversized failure is not retried inside 10 min");
-      now.t += ACB_FAILURE_TTL_MS + 1000;
-      await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
-      assert.equal(calls.length, 2, "after the failure TTL the page is retried");
-    } finally {
-      console.warn = originalWarn;
-    }
+    const clock = { t: Date.parse(PAYLOAD.matches[0].startDateTime) + 60 * 60 * 1000 };
+    const { impl, calls } = jsonFetch();
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => clock.t });
+    assert.equal(calls.length, 1);
+    assert.equal(ACB_CACHE_TTL_MS, 30 * 60 * 1000, "30 minutes");
+    clock.t += ACB_CACHE_TTL_MS - 1000;
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => clock.t });
+    assert.equal(calls.length, 1, "inside the TTL the round is never re-downloaded");
+    clock.t += 2000;
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => clock.t });
+    assert.equal(calls.length, 2, "past the TTL it revalidates");
   });
 
-  test("a failing fetch is isolated: no throw into the caller, failure cached 10 min, later retry lands", async () => {
+  test("a FAILURE is never cached: the very next round retries it", async () => {
     clearAcbCache();
-    const now = { t: NOW };
-    const byUrl = { [ACB_PAGE_URL]: { boom: true } };
-    const { impl, calls } = textFetch(byUrl);
-    const first = await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
-    assert.deepEqual(first.failedCompetitions, ["acb.com"]);
+    const clock = { t: Date.parse(PAYLOAD.matches[0].startDateTime) + 60 * 60 * 1000 };
+    const calls = [];
+    let fail = true;
+    const impl = async (url, init) => {
+      calls.push({ url: String(url), init: init ?? {} });
+      if (fail) throw new Error("network down");
+      return { ok: true, status: 200, json: async () => clone(PAYLOAD) };
+    };
+    const first = await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => clock.t });
     assert.equal(first.failed, 1);
+    assert.deepEqual(first.failedCompetitions, [ACB_SOURCE_LABEL], "the muted acb.com line");
     assert.deepEqual(first.events, []);
-    now.t += 60 * 1000;
-    const second = await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
-    assert.equal(calls.length, 1, "the failure is not retried inside the 10 min TTL");
-    assert.deepEqual(second.failedCompetitions, ["acb.com"]);
-    now.t += ACB_FAILURE_TTL_MS + 1000;
-    byUrl[ACB_PAGE_URL] = { text: acbPageText() };
-    const third = await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => now.t });
+    clock.t += 1000; // ONE second later, still far inside any failure window
+    const second = await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => clock.t });
+    assert.equal(calls.length, 2, "the failure is NOT remembered: no failure cache");
+    assert.deepEqual(second.failedCompetitions, [ACB_SOURCE_LABEL]);
+    fail = false;
+    const third = await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => clock.t });
+    assert.equal(calls.length, 3);
     assert.deepEqual(third.failedCompetitions, []);
-    assert.equal(third.events.length, 2, "the recovered page lands");
+    await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => clock.t });
+    assert.equal(calls.length, 3, "the recovered round is cached from then on");
   });
 
-  test("an unparsable page is a failure, never a throw into the caller", async () => {
+  test("a 401 / an empty round is a failure, never a throw into the caller", async () => {
     clearAcbCache();
-    const { impl } = textFetch({ [ACB_PAGE_URL]: { text: "<html>not the rsc stream</html>" } });
-    const result = await acbForDay({ dayKey: "0", fetchImpl: impl, now: () => NOW });
-    assert.deepEqual(result.failedCompetitions, ["acb.com"]);
+    const unauthorized = { ok: false, status: 401, json: async () => ({}) };
+    const { impl } = jsonFetch(unauthorized);
+    const result = await acbForDay({ dayKey: "0", fetchImpl: impl, now: Date.now() });
+    assert.deepEqual(result.failedCompetitions, [ACB_SOURCE_LABEL]);
     assert.deepEqual(result.events, []);
+
+    clearAcbCache();
+    const empty = clone(PAYLOAD);
+    empty.matches = [];
+    const emptyFetch = jsonFetch(empty);
+    const unparsable = await acbForDay({
+      dayKey: "0",
+      fetchImpl: emptyFetch.impl,
+      now: Date.parse(PAYLOAD.matches[0].startDateTime) + 60 * 60 * 1000
+    });
+    assert.deepEqual(unparsable.failedCompetitions, [ACB_SOURCE_LABEL]);
   });
 
-  test("no fetch available (node --test arms no default fetch): an honest failure, no network, no throw", async () => {
+  test("no fetch available (node --test arms no default fetch): an honest failure, no throw", async () => {
     clearAcbCache();
-    const result = await acbForDay({ dayKey: "0", now: () => NOW });
+    const result = await acbForDay({ dayKey: "0", now: Date.now() });
     assert.deepEqual(result.events, []);
     assert.equal(result.failed, 1);
-    assert.deepEqual(result.failedCompetitions, ["acb.com"]);
+    assert.deepEqual(result.failedCompetitions, [ACB_SOURCE_LABEL]);
   });
 });
 
-describe("wiring: ACB appends after the EuroLeague rows through the guarded paint path", () => {
+describe("acb: the RSC scrape is DELETED, not left behind", () => {
+  test("no chunk scanner, no page URL, no 1 MB cap, no bespoke text fetch", () => {
+    assert.doesNotMatch(ACB_SOURCE, /__next_f/, "the RSC stream marker is gone");
+    assert.doesNotMatch(ACB_SOURCE, /collectChunkText|unescapeChunkText|readStringLiteral/);
+    assert.doesNotMatch(ACB_SOURCE, /findRoundObject|matchObjectEnd|findEnclosingObjectStart/);
+    assert.doesNotMatch(ACB_SOURCE, /resolveTeamRef/, "team refs are ids now, not RSC paths");
+    assert.doesNotMatch(ACB_SOURCE, /acb\.com\/es\/liga\/partidos/, "the scraped page is gone");
+    assert.doesNotMatch(ACB_SOURCE, /ACB_PAGE_URL|ACB_MAX_BYTES|ACB_FAILURE_TTL_MS/);
+    assert.doesNotMatch(ACB_SOURCE, /\.text\(\)/, "the bespoke text fetch is gone");
+    assert.doesNotMatch(ACB_SOURCE, /response\.ok/, "the bounded JSON helper owns the verdict");
+  });
+
+  test("it is built on the shared bounded JSON fetch and the shared timeout", () => {
+    const source = ACB_SOURCE;
+    assert.match(source, /from "\.\/espnScores\.js"/);
+    assert.match(source, /fetchJsonBounded/);
+    assert.match(source, /ESPN_REQUEST_TIMEOUT_MS/);
+    assert.doesNotMatch(source, /ACB_REQUEST_TIMEOUT_MS/, "no bespoke 10 s budget");
+  });
+});
+
+describe("wiring: the screen keeps calling acbForDay through the guarded paint path", () => {
   const mountSource = readFileSync(
     new URL("../js/ui/screens/sports/sportsScreenMethods-01-mount-and-load.js", import.meta.url),
     "utf8"
   );
 
-  test("loadSchedule fetches ACB AFTER the EuroLeague source, appending through the same paint path", () => {
+  test("the module's exported entry point is unchanged, so the screen needs no new call shape", () => {
+    assert.equal(typeof acb.acbForDay, "function");
+    assert.match(mountSource, /import \{ acbForDay \} from "\.\.\/\.\.\/\.\.\/core\/sports\/acb\.js";/);
+    assert.match(mountSource, /await acbForDay\(\{ dayKey: this\.dayKey, force \}\)/);
+  });
+
+  test("the ACB load still rides after EuroLeague, guarded by canPaint() with one muted line", () => {
     const euro = mountSource.indexOf("euroleagueForDay(");
-    const acb = mountSource.indexOf("acbForDay(");
-    assert.ok(euro >= 0 && acb > euro, "ACB rides after the EuroLeague rows");
+    const acbCall = mountSource.indexOf("acbForDay(");
+    assert.ok(euro >= 0 && acbCall > euro, "ACB rides after the EuroLeague rows");
     assert.match(
       mountSource,
       /this\.scheduleEvents\s*=\s*\[\.\.\.this\.scheduleEvents,\s*\.\.\.acb\.events\]/,
       "the append reuses the scheduleEvents paint path"
     );
-  });
-
-  test("the ACB load is guarded by canPaint() and its failure is one muted line inside the try", () => {
-    const acbIdx = mountSource.indexOf("acbForDay(");
-    assert.ok(acbIdx > 0);
-    const start = mountSource.lastIndexOf("try {", acbIdx);
-    const catchIdx = mountSource.indexOf("} catch", acbIdx);
-    assert.ok(start >= 0 && start < acbIdx && catchIdx > acbIdx, "the ACB load is inside a try");
-    const guarded = mountSource.slice(acbIdx, catchIdx).includes("canPaint()");
-    assert.ok(guarded, "the ACB append is guarded by canPaint()");
+    const start = mountSource.lastIndexOf("try {", acbCall);
+    const catchIdx = mountSource.indexOf("} catch", acbCall);
+    assert.ok(start >= 0 && start < acbCall && catchIdx > acbCall, "the ACB load is inside a try");
+    assert.ok(mountSource.slice(acbCall, catchIdx).includes("canPaint()"));
     assert.match(mountSource.slice(catchIdx, catchIdx + 300), /renderSecondaryNotice/);
     assert.doesNotMatch(mountSource, /setInterval/);
+  });
+
+  test("the screen comment does not still describe a scrape or a 1 MB body cap", () => {
+    const start = mountSource.indexOf("FOURTH SCHEDULE SOURCE");
+    const block = mountSource.slice(start, start + 1200);
+    assert.doesNotMatch(block, /scrap/i, "the source is a JSON API now");
+    assert.doesNotMatch(block, /1 MB/, "the 1 MB body cap went with the scrape");
   });
 });

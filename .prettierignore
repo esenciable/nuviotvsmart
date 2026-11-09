@@ -11,3 +11,7 @@ services/**/runtime
 .claude
 .opencode
 .orchestration
+
+# Captured API payloads are evidence, not source: they stay byte-identical to
+# what the endpoint served, so the tests assert against the real answer.
+tests/fixtures
