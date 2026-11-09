@@ -107,9 +107,16 @@ export async function createMagisVodClient({
     portal,
     config: resolvedConfig,
     session,
-    mediaTransport
+    mediaTransport,
+    proxyUrl: resolvedProxyUrl
   });
-  const live = createMagisLive({ portal, config: resolvedConfig, session, mediaTransport });
+  const live = createMagisLive({
+    portal,
+    config: resolvedConfig,
+    session,
+    mediaTransport,
+    proxyUrl: resolvedProxyUrl
+  });
   return {
     config: resolvedConfig,
     crypto: magisCrypto,

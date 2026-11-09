@@ -236,6 +236,11 @@ function createMagisProxyServer({ config, log = () => {}, httpsRequest = https.r
       if (range) headers.Range = range;
 
       log(`media ${request.method} ${host}/${mediaPath}`);
+      // Some Magis CDNs only answer on plain http: the https socket never
+      // completes, so the channel would fail even though the Android client
+      // plays it. One fallback, once per request, and only before any byte is
+      // sent to the player.
+      let schemeFallbackUsed = false;
       requestMediaUpstream({ target, method: request.method, headers, redirectsLeft: 3 });
 
       function requestMediaUpstream({ target, method, headers, redirectsLeft }) {
@@ -278,6 +283,20 @@ function createMagisProxyServer({ config, log = () => {}, httpsRequest = https.r
         upstream.on("error", (error) => {
           if (response.headersSent) {
             response.destroy();
+            return;
+          }
+          if (!schemeFallbackUsed && target.startsWith("https://")) {
+            schemeFallbackUsed = true;
+            const httpTarget = `http://${target.slice("https://".length)}`;
+            log(
+              `media: https failed for ${host} (${error.code || error.message}), retrying over http`
+            );
+            requestMediaUpstream({
+              target: httpTarget,
+              method,
+              headers,
+              redirectsLeft
+            });
             return;
           }
           sendJson(response, 502, { error: `magis-proxy: upstream error: ${error.message}` });
