@@ -425,3 +425,41 @@ test("portal: an unknown portal host is refused exactly as before", async () => 
     await close();
   }
 });
+
+// Several Magis CDNs answer only on plain http: the https socket never
+// completes. Measured from the server: http gives 401 (auth required, as the
+// proxy supplies) while https never connects. Forcing https turned a playable
+// channel into a 502 and, worse, once crashed the process because
+// https.request rejects an http target with ERR_INVALID_PROTOCOL.
+test("media: an https socket failure retries the same request once over http", async () => {
+  const https = createUpstreamStub(() => ({
+    error: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })
+  }));
+  const http = createUpstreamStub(() => ({
+    response: fakeUpstreamResponse({
+      statusCode: 200,
+      headers: { "content-type": "application/vnd.apple.mpegurl" },
+      chunks: ["#EXTM3U\n#EXTINF:4,\nseg1.ts\n"]
+    })
+  }));
+  const server = createMagisProxyServer({
+    config: CONFIG,
+    httpsRequest: https.httpsRequest,
+    httpRequest: http.httpsRequest
+  });
+  const base = await listen(server);
+  try {
+    const response = await fetch(
+      `${base}/media/cdn-vod.example/live/pc-1.m3u8?magis_auth=auth-1&magis_license=lic-1`
+    );
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, /#EXTM3U/);
+    assert.match(body, /\/media\/cdn-vod\.example\/live\/seg1\.ts/, "segments come back through the proxy");
+    assert.equal(https.calls.length, 1, "https is tried first");
+    assert.equal(http.calls.length, 1, "http is tried exactly once");
+    assert.match(http.calls[0].targetUrl, /^http:\/\/cdn-vod\.example\/live\/pc-1\.m3u8/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});

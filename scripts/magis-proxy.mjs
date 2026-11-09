@@ -166,7 +166,12 @@ function normalizeHost(host = "") {
     .replace(/\/+$/, "");
 }
 
-function createMagisProxyServer({ config, log = () => {}, httpsRequest = https.request } = {}) {
+function createMagisProxyServer({
+  config,
+  log = () => {},
+  httpsRequest = https.request,
+  httpRequest = http.request
+} = {}) {
   const allowedHosts = new Set((config?.hosts || []).map(normalizeHost));
   if (allowedHosts.size === 0) {
     throw new Error("magis-proxy: loaded config has no hosts");
@@ -244,7 +249,10 @@ function createMagisProxyServer({ config, log = () => {}, httpsRequest = https.r
       requestMediaUpstream({ target, method: request.method, headers, redirectsLeft: 3 });
 
       function requestMediaUpstream({ target, method, headers, redirectsLeft }) {
-        const upstream = httpsRequest(target, { method, headers }, (upstreamResponse) => {
+        // The requester must match the scheme: https.request rejects an http
+        // target with ERR_INVALID_PROTOCOL, which would crash the process.
+        const requester = target.startsWith("http://") ? httpRequest : httpsRequest;
+        const onUpstream = (upstreamResponse) => {
           const status = upstreamResponse.statusCode || 502;
           if ([301, 302, 303, 307, 308].includes(status) && upstreamResponse.headers.location) {
             if (redirectsLeft <= 0) {
@@ -279,7 +287,15 @@ function createMagisProxyServer({ config, log = () => {}, httpsRequest = https.r
             return;
           }
           pipeMediaResponse(request, response, upstreamResponse, { target, auth, license });
-        });
+        };
+
+        let upstream;
+        try {
+          upstream = requester(target, { method, headers }, onUpstream);
+        } catch (error) {
+          sendJson(response, 502, { error: `magis-proxy: upstream error: ${error.message}` });
+          return;
+        }
         upstream.on("error", (error) => {
           if (response.headersSent) {
             response.destroy();
